@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<style>
+  :root{ --bg:#071320; --accent:#00ffd1; --text:#e6eef8; --muted:#9fb0c6;}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Arial;-webkit-font-smoothing:antialiased;}
+  .app{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:env(safe-area-inset-top) 12px 12px;box-sizing:border-box;}
+  .camera{width:100%;flex:1 1 auto;border-radius:12px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;position:relative;}
+  canvas,video{width:100%;height:100%;object-fit:cover;display:block;}
+  .hud{width:100%;padding:12px 0;display:flex;flex-direction:column;gap:8px;align-items:center;}
+  .detected{font-size:48px;font-weight:800;color:var(--accent);letter-spacing:1px;}
+  .conf{font-size:16px;color:var(--muted)}
+  .buffer{font-size:18px;padding:6px 10px;background:rgba(255,255,255,0.04);border-radius:8px;width:100%;text-align:center;word-break:break-word}
+  .bar{position:absolute;left:8px;top:8px;display:flex;gap:8px}
+  .bar button{padding:8px;border-radius:10px;border:0;background:rgba(255,255,255,0.05);color:var(--text)}
+  .perm{display:none;padding:10px;border-radius:8px;background:#08111a;color:var(--muted);margin:8px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="camera" id="camWrap">
+    <video id="video" autoplay playsinline muted style="display:none"></video>
+    <canvas id="canvas" width="360" height="640"></canvas>
+
+    <div class="bar">
+      <button id="start">Start</button>
+      <button id="stop">Stop</button>
+      <button id="clear">Clear</button>
+    </div>
+
+    <div class="perm" id="perm">Camera blocked. Allow camera in browser or embed iframe must allow camera.</div>
+  </div>
+
+  <div class="hud">
+    <div class="detected" id="label">—</div>
+    <div class="conf" id="conf">Confidence: —</div>
+    <div class="buffer" id="buffer"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+<script>
+/* MOBILE-FIRST: very similar logic as desktop file, trimmed UI */
+const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
+const INFER_FPS = 12;
+const CONFIRM_CONFIDENCE = 0.7;
+const HOLD_FRAMES = 6;
+const PAUSE_FRAMES = 5;
+const SMOOTH_WINDOW = 4;
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const clearBtn = document.getElementById('clear');
+const labelEl = document.getElementById('label');
+const confEl = document.getElementById('conf');
+const bufferEl = document.getElementById('buffer');
+const perm = document.getElementById('perm');
+
+let weights=null, classes=null;
+(async function loadW(){
+  for(const n of MODEL_FILES){
+    try{ const r=await fetch(n); if(!r.ok) continue; const j=await r.json(); weights=j; classes=j.classes||null; return; }catch(e){}
+  }
+})();
+function denseForward(x,kernel,bias){ const inD=kernel.length, outD=kernel[0].length; const out=new Float32Array(outD); for(let j=0;j<outD;j++){ let s=0; for(let i=0;i<inD;i++) s+=x[i]*kernel[i][j]; s+=bias[j]; out[j]=s;} return out;}
+function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
+function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
+function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
+
+const hands = new Hands({ locateFile:(f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+hands.onResults(onResults);
+
+startBtn.onclick = async ()=>{
+  try{
+    perm.style.display='none';
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});
+    video.srcObject = stream; await video.play();
+    lastTick = performance.now(); requestAnimationFrame(tick);
+  }catch(e){
+    perm.style.display='block';
+    alert('Camera error: '+(e.message||e.name));
+  }
+};
+stopBtn.onclick = ()=>{ if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; } };
+clearBtn.onclick = ()=>{ bufferEl.innerText=''; };
+
+let lastTick = 0;
+async function tick(ts){
+  requestAnimationFrame(tick);
+  const dt = ts - lastTick;
+  if(dt < (1000/INFER_FPS)) return;
+  lastTick = ts;
+  if(video.readyState >= 2) await hands.send({image:video});
+}
+
+let recentPreds=[], holdFrames=0, pauseFrames=0, lastVoted=null, lastConfirmed=null, wordBuffer='';
+function onResults(results){
+  canvas.width = canvas.clientWidth;
+  canvas.height = canvas.clientHeight;
+  ctx.save(); ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.translate(canvas.width,0); ctx.scale(-1,1);
+  if(video.readyState>=2) ctx.drawImage(video,0,0,canvas.width,canvas.height);
+
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+    const handsArr = results.multiHandLandmarks;
+    // draw
+    drawLandmarks(handsArr);
+    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.width, y: lm.y * canvas.height})));
+    const vec = twoHandsXYToVector(all_hands_px);
+    if(weights){
+      let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
+      let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
+      let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
+      const probs = softmax(out2); const idx = argmax(probs);
+      const label = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
+      const conf = probs[idx];
+      recentPreds.push({label,conf}); if(recentPreds.length>SMOOTH_WINDOW) recentPreds.shift();
+      const counts={}; for(const p of recentPreds) counts[p.label]=(counts[p.label]||0)+1;
+      let voted = recentPreds[recentPreds.length-1].label; let maxc=0;
+      for(const k in counts) if(counts[k]>maxc){ maxc=counts[k]; voted=k; }
+
+      labelEl.innerText = voted; confEl.innerText = 'Confidence: '+conf.toFixed(3);
+
+      if(conf >= CONFIRM_CONFIDENCE){
+        if(voted === lastVoted) holdFrames++; else { holdFrames = 1; lastVoted = voted; }
+        pauseFrames = 0;
+      } else { pauseFrames++; holdFrames=0; lastVoted=null; }
+
+      if(holdFrames >= HOLD_FRAMES && lastConfirmed !== voted){
+        wordBuffer += voted;
+        bufferEl.innerText = wordBuffer;
+        lastConfirmed = voted;
+        holdFrames = 0;
+        try{ parent.postMessage({type:'DETECTION', payload:{label:voted,confidence:conf,time:Date.now()}}, '*'); }catch(e){}
+      }
+      if(pauseFrames >= PAUSE_FRAMES) lastConfirmed = null;
+    }
+  } else {
+    pauseFrames++; holdFrames=0; lastVoted=null;
+    if(pauseFrames >= PAUSE_FRAMES) lastConfirmed=null;
+  }
+  ctx.restore();
+}
+
+function twoHandsXYToVector(all_hands_px){
+  if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
+  function singleVec(pxs){
+    const wrist = pxs[0]; const pts=[]; let maxd=0;
+    for(let i=0;i<pxs.length;i++){ const dx = pxs[i].x - wrist.x, dy = pxs[i].y - wrist.y; pts.push(dx); pts.push(dy); const d=Math.hypot(dx,dy); if(d>maxd) maxd=d; }
+    if(maxd===0) maxd=1;
+    const out = new Float32Array(42);
+    for(let i=0;i<21;i++){ out[i*2]=pts[i*2]/maxd; out[i*2+1]=pts[i*2+1]/maxd; }
+    return out;
+  }
+  const v1 = (all_hands_px.length>=1)? singleVec(all_hands_px[0]) : new Float32Array(42);
+  const v2 = (all_hands_px.length>=2)? singleVec(all_hands_px[1]) : new Float32Array(42);
+  const concat = new Float32Array(84); concat.set(v1,0); concat.set(v2,42); return concat;
+}
+function drawLandmarks(handsArr){
+  ctx.fillStyle='rgba(0,200,255,0.9)'; ctx.strokeStyle='rgba(0,255,170,0.9)'; ctx.lineWidth=2;
+  const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
+  ctx.beginPath();
+  for(const hand of handsArr){
+    for(const c of connections){
+      const a = hand[c[0]], b = hand[c[1]];
+      ctx.moveTo(canvas.width - a.x*canvas.width, a.y*canvas.height);
+      ctx.lineTo(canvas.width - b.x*canvas.width, b.y*canvas.height);
+    }
+  }
+  ctx.stroke();
+  for(const hand of handsArr){
+    for(let i=0;i<hand.length;i++){
+      const p = hand[i];
+      ctx.beginPath(); ctx.arc(canvas.width - p.x*canvas.width, p.y*canvas.height, i===8?6:4,0,Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+/* quick permission hint */
+(async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') perm.style.display='block'; }catch(e){} })();
+</script>
+</body>
+</html>
