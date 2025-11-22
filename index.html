@@ -1,191 +1,240 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>ISL Mobile Parent — 2s rules</title>
 <style>
-  :root{ --bg:#071320; --accent:#00ffd1; --text:#e6eef8; --muted:#9fb0c6;}
-  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Arial;-webkit-font-smoothing:antialiased;}
-  .app{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:env(safe-area-inset-top) 12px 12px;box-sizing:border-box;}
-  .camera{width:100%;flex:1 1 auto;border-radius:12px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;position:relative;}
-  canvas,video{width:100%;height:100%;object-fit:cover;display:block;}
-  .hud{width:100%;padding:12px 0;display:flex;flex-direction:column;gap:8px;align-items:center;}
-  .detected{font-size:48px;font-weight:800;color:var(--accent);letter-spacing:1px;}
-  .conf{font-size:16px;color:var(--muted)}
-  .buffer{font-size:18px;padding:6px 10px;background:rgba(255,255,255,0.04);border-radius:8px;width:100%;text-align:center;word-break:break-word}
-  .bar{position:absolute;left:8px;top:8px;display:flex;gap:8px}
-  .bar button{padding:8px;border-radius:10px;border:0;background:rgba(255,255,255,0.05);color:var(--text)}
-  .perm{display:none;padding:10px;border-radius:8px;background:#08111a;color:var(--muted);margin:8px;}
+  :root{ --bg:#071320; --panel:#0b1b24; --accent:#00ffd1; --muted:#9fb0c6; --bubble-deaf:#0f2430; --bubble-hear:#0b2a22;}
+  html,body{height:100%;margin:0;background:var(--bg);color:#e6eef8;font-family:system-ui,Arial;padding:12px;box-sizing:border-box;}
+  .app{max-width:420px;margin:0 auto;}
+  .frameWrap{height:52vh;border-radius:12px;overflow:hidden;background:#000;border:2px solid #0f2b35;}
+  iframe{width:100%;height:100%;border:0;display:block;}
+  .hud{display:flex;gap:8px;align-items:center;padding:10px 0}
+  .buffer{flex:1;padding:10px;border-radius:10px;background:rgba(255,255,255,0.03);font-size:18px;font-weight:700;color:var(--accent);min-height:48px;display:flex;align-items:center}
+  .sendBtn{width:52px;height:48px;border-radius:10px;border:0;background:var(--accent);color:#002;padding:0;font-weight:700;font-size:20px;cursor:pointer}
+  .small{color:var(--muted);font-size:13px}
+  .chat{margin-top:12px;max-height:34vh;overflow:auto;padding:8px;border-radius:10px;background:transparent}
+  .bubble{padding:10px;border-radius:10px;margin-bottom:10px;word-break:break-word}
+  .bubble.deaf{background:var(--bubble-deaf); color:#cfeffd;}
+  .bubble.hear{background:var(--bubble-hear); color:#dfffdc; text-align:right}
+  .status{margin-top:8px;color:var(--muted);font-size:13px}
+  .controls{display:flex;gap:8px;margin-top:8px;align-items:center}
+  .btn{padding:8px 10px;border-radius:8px;border:0;background:#0b2830;color:#cfeffd;cursor:pointer}
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="camera" id="camWrap">
-    <video id="video" autoplay playsinline muted style="display:none"></video>
-    <canvas id="canvas" width="360" height="640"></canvas>
+  <div class="app">
+    <h3 style="margin:6px 0 12px 0">ISL — Mobile Parent (2s rules)</h3>
 
-    <div class="bar">
-      <button id="start">Start</button>
-      <button id="stop">Stop</button>
-      <button id="clear">Clear</button>
+    <div class="frameWrap">
+      <iframe id="islIframe" src="/mnt/data/index.html" allow="camera; microphone; autoplay" title="ISL iframe"></iframe>
     </div>
 
-    <div class="perm" id="perm">Camera blocked. Allow camera in browser or embed iframe must allow camera.</div>
-  </div>
+    <div class="hud">
+      <div id="bufferDisplay" class="buffer" aria-live="polite">—</div>
+      <button id="sendBtn" class="sendBtn" title="Send">→</button>
+    </div>
 
-  <div class="hud">
-    <div class="detected" id="label">—</div>
-    <div class="conf" id="conf">Confidence: —</div>
-    <div class="buffer" id="buffer"></div>
-  </div>
-</div>
+    <div class="controls">
+      <button id="clearBtn" class="btn">Clear</button>
+      <div class="small" id="statusText">Status: waiting for detection...</div>
+    </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <div class="chat" id="chatArea" aria-live="polite"></div>
+  </div>
 
 <script>
-/* MOBILE-FIRST: very similar logic as desktop file, trimmed UI */
-const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
-const INFER_FPS = 12;
-const CONFIRM_CONFIDENCE = 0.7;
-const HOLD_FRAMES = 6;
-const PAUSE_FRAMES = 5;
-const SMOOTH_WINDOW = 4;
+(function(){
+  const iframe = document.getElementById('islIframe');
+  const bufferDisplay = document.getElementById('bufferDisplay');
+  const sendBtn = document.getElementById('sendBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const chatArea = document.getElementById('chatArea');
+  const statusText = document.getElementById('statusText');
 
-const video = document.getElementById('video');
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const startBtn = document.getElementById('start');
-const stopBtn = document.getElementById('stop');
-const clearBtn = document.getElementById('clear');
-const labelEl = document.getElementById('label');
-const confEl = document.getElementById('conf');
-const bufferEl = document.getElementById('buffer');
-const perm = document.getElementById('perm');
+  // Timing config
+  const HOLD_MS = 2000;      // same-letter hold to append
+  const NO_HAND_MS = 2000;   // no-detections to insert space
 
-let weights=null, classes=null;
-(async function loadW(){
-  for(const n of MODEL_FILES){
-    try{ const r=await fetch(n); if(!r.ok) continue; const j=await r.json(); weights=j; classes=j.classes||null; return; }catch(e){}
+  // State
+  let lastLabel = null;
+  let labelStart = 0;
+  let holdTimer = null;
+  let noHandTimer = null;
+  let lastDetectionAt = 0;
+  let wordBuffer = '';
+  let spacePending = false;
+
+  function updateBufferUI(){
+    bufferDisplay.innerText = wordBuffer.length ? wordBuffer : '—';
   }
-})();
-function denseForward(x,kernel,bias){ const inD=kernel.length, outD=kernel[0].length; const out=new Float32Array(outD); for(let j=0;j<outD;j++){ let s=0; for(let i=0;i<inD;i++) s+=x[i]*kernel[i][j]; s+=bias[j]; out[j]=s;} return out;}
-function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
-function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
-function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-const hands = new Hands({ locateFile:(f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
-hands.onResults(onResults);
-
-startBtn.onclick = async ()=>{
-  try{
-    perm.style.display='none';
-    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false});
-    video.srcObject = stream; await video.play();
-    lastTick = performance.now(); requestAnimationFrame(tick);
-  }catch(e){
-    perm.style.display='block';
-    alert('Camera error: '+(e.message||e.name));
+  function appendLetter(letter){
+    if(!letter) return;
+    wordBuffer += letter;
+    updateBufferUI();
+    // also notify iframe or parent logic as needed
+    // we forward a DETECTION-like event into chat timeline as token (optional visual)
+    const token = document.createElement('span');
+    token.style.cssText = 'display:inline-block;padding:6px 10px;border-radius:14px;background:#042a2a;color:var(--accent);margin:4px';
+    token.innerText = letter;
+    chatArea.appendChild(token);
+    chatArea.scrollTop = chatArea.scrollHeight;
   }
-};
-stopBtn.onclick = ()=>{ if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; } };
-clearBtn.onclick = ()=>{ bufferEl.innerText=''; };
 
-let lastTick = 0;
-async function tick(ts){
-  requestAnimationFrame(tick);
-  const dt = ts - lastTick;
-  if(dt < (1000/INFER_FPS)) return;
-  lastTick = ts;
-  if(video.readyState >= 2) await hands.send({image:video});
-}
+  function appendSpace(){
+    // only if buffer not empty and last char is not space
+    if(wordBuffer && wordBuffer.slice(-1) !== ' '){
+      wordBuffer += ' ';
+      updateBufferUI();
+      const s = document.createElement('div'); s.className='bubble deaf'; s.innerText='[space inserted]';
+      chatArea.appendChild(s);
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
+  }
 
-let recentPreds=[], holdFrames=0, pauseFrames=0, lastVoted=null, lastConfirmed=null, wordBuffer='';
-function onResults(results){
-  canvas.width = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
-  ctx.save(); ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.translate(canvas.width,0); ctx.scale(-1,1);
-  if(video.readyState>=2) ctx.drawImage(video,0,0,canvas.width,canvas.height);
+  function flushAsMessage(){
+    const text = wordBuffer.trim();
+    if(!text) return;
+    // add to chat area as deaf message
+    const b = document.createElement('div'); b.className = 'bubble deaf';
+    b.innerHTML = '<strong>DEAF →</strong> ' + escapeHtml(text);
+    chatArea.appendChild(b);
+    chatArea.scrollTop = chatArea.scrollHeight;
+    // clear buffer
+    wordBuffer = '';
+    updateBufferUI();
+    // Optionally, send to iframe via postMessage (if you want iframe TTS)
+    try{
+      iframe.contentWindow.postMessage({ type:'MESSAGE', payload:{ text } }, '*');
+    }catch(e){}
+  }
 
-  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
-    const handsArr = results.multiHandLandmarks;
-    // draw
-    drawLandmarks(handsArr);
-    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.width, y: lm.y * canvas.height})));
-    const vec = twoHandsXYToVector(all_hands_px);
-    if(weights){
-      let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
-      let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
-      let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
-      const probs = softmax(out2); const idx = argmax(probs);
-      const label = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
-      const conf = probs[idx];
-      recentPreds.push({label,conf}); if(recentPreds.length>SMOOTH_WINDOW) recentPreds.shift();
-      const counts={}; for(const p of recentPreds) counts[p.label]=(counts[p.label]||0)+1;
-      let voted = recentPreds[recentPreds.length-1].label; let maxc=0;
-      for(const k in counts) if(counts[k]>maxc){ maxc=counts[k]; voted=k; }
+  function clearBuffer(){
+    wordBuffer = '';
+    updateBufferUI();
+  }
 
-      labelEl.innerText = voted; confEl.innerText = 'Confidence: '+conf.toFixed(3);
+  // export helpers for console debugging
+  window.__mobileParent = {
+    getBuffer: ()=> wordBuffer,
+    appendLetter,
+    appendSpace,
+    flushAsMessage,
+    clearBuffer
+  };
 
-      if(conf >= CONFIRM_CONFIDENCE){
-        if(voted === lastVoted) holdFrames++; else { holdFrames = 1; lastVoted = voted; }
-        pauseFrames = 0;
-      } else { pauseFrames++; holdFrames=0; lastVoted=null; }
+  // Send button behavior
+  sendBtn.addEventListener('click', () => {
+    flushAsMessage();
+    // tiny button feedback
+    sendBtn.style.transform = 'scale(0.96)';
+    setTimeout(()=> sendBtn.style.transform = '', 120);
+  });
 
-      if(holdFrames >= HOLD_FRAMES && lastConfirmed !== voted){
-        wordBuffer += voted;
-        bufferEl.innerText = wordBuffer;
-        lastConfirmed = voted;
-        holdFrames = 0;
-        try{ parent.postMessage({type:'DETECTION', payload:{label:voted,confidence:conf,time:Date.now()}}, '*'); }catch(e){}
+  clearBtn.addEventListener('click', () => {
+    clearBuffer();
+  });
+
+  // handle incoming messages from iframe
+  window.addEventListener('message', (ev) => {
+    const msg = ev.data || {};
+    if(!msg.type) return;
+    // Accept DETECTION and STATUS messages
+    if(msg.type === 'DETECTION' && msg.payload){
+      const p = msg.payload;
+      // Consider tokenType LETTER as the candidate label from iframe
+      if(p.tokenType === 'LETTER' && p.value){
+        handleDetectionLabel(String(p.value));
+      } else if(p.tokenType === 'SYSTEM' && p.value === 'NO_HANDS'){
+        // explicit no-hands signal (optional)
+        handleNoHands();
+      } else if(p.tokenType === 'WORD'){
+        // iframe sent a full word - add to chat
+        const b = document.createElement('div'); b.className='bubble deaf';
+        b.innerHTML = '<strong>DEAF →</strong> ' + escapeHtml(String(p.value || ''));
+        chatArea.appendChild(b);
+        chatArea.scrollTop = chatArea.scrollHeight;
       }
-      if(pauseFrames >= PAUSE_FRAMES) lastConfirmed = null;
+      lastDetectionAt = Date.now();
+      statusText.innerText = 'Status: detection received';
+    } else if(msg.type === 'STATUS' && msg.payload){
+      // if iframe provides camera or buffer info
+      if('camera' in msg.payload){
+        statusText.innerText = 'Status: camera ' + msg.payload.camera;
+      }
+      if('buffer' in msg.payload){
+        // optional keep in sync
+        wordBuffer = msg.payload.buffer || wordBuffer;
+        updateBufferUI();
+      }
+      lastDetectionAt = Date.now();
+    } else if(msg.type === 'MESSAGE' && msg.payload){
+      // accept final messages from iframe
+      const b = document.createElement('div'); b.className='bubble deaf';
+      b.innerHTML = '<strong>DEAF →</strong> ' + escapeHtml(String(msg.payload.text || ''));
+      chatArea.appendChild(b);
+      chatArea.scrollTop = chatArea.scrollHeight;
     }
-  } else {
-    pauseFrames++; holdFrames=0; lastVoted=null;
-    if(pauseFrames >= PAUSE_FRAMES) lastConfirmed=null;
-  }
-  ctx.restore();
-}
+  });
 
-function twoHandsXYToVector(all_hands_px){
-  if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
-  function singleVec(pxs){
-    const wrist = pxs[0]; const pts=[]; let maxd=0;
-    for(let i=0;i<pxs.length;i++){ const dx = pxs[i].x - wrist.x, dy = pxs[i].y - wrist.y; pts.push(dx); pts.push(dy); const d=Math.hypot(dx,dy); if(d>maxd) maxd=d; }
-    if(maxd===0) maxd=1;
-    const out = new Float32Array(42);
-    for(let i=0;i<21;i++){ out[i*2]=pts[i*2]/maxd; out[i*2+1]=pts[i*2+1]/maxd; }
-    return out;
-  }
-  const v1 = (all_hands_px.length>=1)? singleVec(all_hands_px[0]) : new Float32Array(42);
-  const v2 = (all_hands_px.length>=2)? singleVec(all_hands_px[1]) : new Float32Array(42);
-  const concat = new Float32Array(84); concat.set(v1,0); concat.set(v2,42); return concat;
-}
-function drawLandmarks(handsArr){
-  ctx.fillStyle='rgba(0,200,255,0.9)'; ctx.strokeStyle='rgba(0,255,170,0.9)'; ctx.lineWidth=2;
-  const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
-  ctx.beginPath();
-  for(const hand of handsArr){
-    for(const c of connections){
-      const a = hand[c[0]], b = hand[c[1]];
-      ctx.moveTo(canvas.width - a.x*canvas.width, a.y*canvas.height);
-      ctx.lineTo(canvas.width - b.x*canvas.width, b.y*canvas.height);
+  // handle label candidate logic
+  function handleDetectionLabel(label){
+    const now = Date.now();
+    if(lastLabel !== label){
+      // new label candidate - restart hold timer
+      lastLabel = label;
+      labelStart = now;
+      if(holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      holdTimer = setTimeout(() => {
+        appendLetter(label);
+        // after appending, reset candidate
+        lastLabel = null;
+        holdTimer = null;
+      }, HOLD_MS);
+    } else {
+      // same label continuing - ensure timer exists
+      if(!holdTimer){
+        const elapsed = now - labelStart;
+        const remaining = Math.max(0, HOLD_MS - elapsed);
+        holdTimer = setTimeout(() => {
+          appendLetter(label); lastLabel = null; holdTimer = null;
+        }, remaining);
+      }
     }
+    // reset no-hand timer because we received detection
+    if(noHandTimer){ clearTimeout(noHandTimer); noHandTimer = null; }
+    // ensure we know detections ongoing
+    lastDetectionAt = now;
   }
-  ctx.stroke();
-  for(const hand of handsArr){
-    for(let i=0;i<hand.length;i++){
-      const p = hand[i];
-      ctx.beginPath(); ctx.arc(canvas.width - p.x*canvas.width, p.y*canvas.height, i===8?6:4,0,Math.PI*2); ctx.fill();
-    }
-  }
-}
 
-/* quick permission hint */
-(async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') perm.style.display='block'; }catch(e){} })();
+  function handleNoHands(){
+    // start no-hand timer if not present
+    if(noHandTimer) return;
+    noHandTimer = setTimeout(() => {
+      appendSpace();
+      noHandTimer = null;
+    }, NO_HAND_MS);
+  }
+
+  // fallback: if no DETECTION messages received for NO_HAND_MS (e.g., iframe didn't emit NO_HANDS),
+  // treat as no-hands
+  setInterval(() => {
+    const now = Date.now();
+    if(now - lastDetectionAt > NO_HAND_MS){
+      // start no-hand behavior
+      handleNoHands();
+    }
+  }, 500);
+
+  // small HTML escape helper
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (m)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+  // initial UI update
+  updateBufferUI();
+  statusText.innerText = 'Status: ready';
+})();
 </script>
 </body>
 </html>
