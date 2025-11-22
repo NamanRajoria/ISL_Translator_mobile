@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Mobile (Fixed sizing)</title>
+<title>ISL Translator — Mobile (Landscape Preview)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -19,16 +19,28 @@
   .app{max-width:920px;margin:12px auto;padding:12px;box-sizing:border-box;}
   .container{display:grid;grid-template-columns:1fr;gap:12px;}
   @media(min-width:900px){ .container{grid-template-columns: 1fr 420px; align-items:start;} }
-  .camera-wrap{background: var(--panel-bg); border-radius:12px; overflow:hidden; position:relative; border: 2px solid rgba(255,255,255,0.04); display:flex;flex-direction:column; min-height:0;}
-  /* canvas will be sized by JS to maintain aspect and avoid using viewport height */
+
+  /* Camera / image area */
+  .camera-wrap{
+    background: var(--panel-bg);
+    border-radius:12px;
+    overflow:hidden;
+    position:relative;
+    border: 2px solid rgba(255,255,255,0.04);
+    display:flex;flex-direction:column;
+    min-height:0;
+  }
+  /* We force a landscape preview: canvas width = container width, height = width * (9/16) */
   #canvas{width:100%;height:auto;display:block;background:var(--panel-bg);}
   .controls-top{position:absolute;left:12px;top:12px;display:flex;gap:8px;z-index:40}
   .ctrl-btn{padding:8px 10px;border-radius:8px;border:0;background:rgba(0,0,0,0.35);color:var(--text);cursor:pointer}
   .hud-bottom{position:relative;padding:12px;background:transparent;display:flex;flex-direction:column;gap:12px}
+
   .detected-large{font-size:48px;font-weight:800;color:var(--panel-bg);text-align:center}
   .buffer-row{display:flex;gap:8px;align-items:center;justify-content:center}
   .buffer{flex:1;padding:12px;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--panel-bg);font-weight:700;min-height:48px;text-align:center}
   .send-btn{width:56px;height:48px;border-radius:10px;border:0;background:var(--accent);color:var(--text);font-weight:800;font-size:20px;cursor:pointer}
+
   .chat-panel{background:transparent;border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:12px}
   .chat-window{background:rgba(0,0,0,0.06);padding:12px;border-radius:10px;max-height:58vh;overflow:auto}
   .chat-controls{display:flex;gap:8px;align-items:center;margin-top:8px}
@@ -54,22 +66,29 @@
           <button class="ctrl-btn" id="stop">Stop</button>
           <button class="ctrl-btn" id="clearBufferBtn">Clear</button>
         </div>
+
         <video id="video" autoplay playsinline muted style="display:none"></video>
-        <canvas id="canvas" width="640" height="480"></canvas>
+        <!-- canvas shows a landscape preview (16:9) cropped from the camera feed -->
+        <canvas id="canvas" width="1280" height="720"></canvas>
+
         <div class="hud-bottom">
           <div style="display:flex;align-items:center;justify-content:center;">
             <div class="detected-large" id="label">—</div>
           </div>
+
           <div class="buffer-row">
             <div id="buffer" class="buffer" aria-live="polite">—</div>
             <button id="sendBtn" class="send-btn" title="Send">→</button>
           </div>
         </div>
+
         <div class="perm" id="perm">Camera permission appears blocked. Tap Start then allow camera in your browser settings.</div>
       </div>
+
       <div class="chat-panel">
         <div style="font-weight:700">Conversation</div>
         <div class="chat-window" id="chatWindow" aria-live="polite"></div>
+
         <div class="chat-controls">
           <button id="micBtn" class="mic-btn" title="Tap to talk">🎤</button>
           <input id="transcript" class="input" placeholder="Type or speak a message..." />
@@ -85,12 +104,13 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
 <script>
-/* Fixed sizing: compute canvas height from container width and video aspect ratio (avoid using viewport height) */
+/* Landscape preview (16:9) crop from portrait camera feed.
+   Canvas width driven by container width; height = width * 9/16. */
 const INFER_FPS = 12;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MAX_CROP_PERCENT = 0.25;
+const MAX_CROP_PERCENT = 0.25; // cap cropping to avoid over-zoom
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -122,10 +142,12 @@ function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
+/* mediapipe setup */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
+/* state */
 let recentPreds = [];
 let wordBuffer = '';
 let candidateLabel = null;
@@ -135,48 +157,77 @@ let spaceInsertedAt = 0;
 let lastAppendTime = 0;
 let lastTick = 0;
 
-/* ---- NEW: compute canvas height based on container width and video aspect (prevents height feedback loops) ---- */
-function updateCanvasSizeFromVideoAspect(){
+/* ---------- Layout: enforce 16:9 preview ---------- */
+function updateCanvasToLandscape() {
   const container = document.getElementById('cameraWrap');
   if(!container) return;
   const dpr = window.devicePixelRatio || 1;
   const cw = container.clientWidth;
-  // If video metadata available, use its aspect; otherwise assume 4:3
-  const vidAspect = (video && video.videoWidth && video.videoHeight) ? (video.videoWidth / video.videoHeight) : (4/3);
-  // compute desired CSS height to maintain aspect ratio: width / aspect
-  const desiredCssH = Math.round(cw / vidAspect);
+  // Landscape 16:9
+  const desiredCssH = Math.round(cw * 9 / 16);
   canvas.style.width = cw + 'px';
   canvas.style.height = desiredCssH + 'px';
-  // backing store
   canvas.width = Math.round(cw * dpr);
   canvas.height = Math.round(desiredCssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-window.addEventListener('resize', updateCanvasSizeFromVideoAspect);
+window.addEventListener('resize', updateCanvasToLandscape);
+updateCanvasToLandscape();
 
-/* keep sizing in sync once video metadata loads */
-video.addEventListener('loadedmetadata', () => {
-  updateCanvasSizeFromVideoAspect();
-});
+/* start/stop camera */
+startBtn.onclick = async () => {
+  perm.style.display='none';
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user' }, audio:false });
+    video.srcObject = stream;
+    await video.play();
+    // when metadata available, ensure canvas size update
+    video.addEventListener('loadedmetadata', () => { updateCanvasToLandscape(); }, { once: true });
+    lastTick = performance.now();
+    requestAnimationFrame(tick);
+  }catch(e){
+    perm.style.display='block';
+    alert('Camera error: '+ (e.message || e.name));
+  }
+};
+stopBtn.onclick = ()=>{ if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; } };
+clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
 
-/* initial size */
-updateCanvasSizeFromVideoAspect();
+/* send button (flush) */
+sendBtn.onclick = ()=> {
+  const text = wordBuffer.trim();
+  if(!text) return;
+  addChatBubble(text, 'DEAF');
+  try{ const u = new SpeechSynthesisUtterance(text); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){}
+  wordBuffer=''; bufferEl.innerText='—';
+};
 
-/* helper: compute limited cover crop */
+/* main loop */
+async function tick(ts){
+  requestAnimationFrame(tick);
+  const dt = ts - lastTick;
+  if(dt < (1000/INFER_FPS)) return;
+  lastTick = ts;
+  if(video.readyState >= 2) await hands.send({image: video});
+}
+
+/* compute limited cover crop so we crop portrait camera to landscape target without over-zoom */
 function computeCoverCrop(vw, vh, targetW, targetH){
   const videoAspect = vw / vh;
   const targetAspect = targetW / targetH;
   let sx=0, sy=0, sw=vw, sh=vh;
   if(videoAspect > targetAspect){
+    // video wider -> crop sides
     sw = Math.round(vh * targetAspect);
     sx = Math.round((vw - sw)/2);
     const cropPercent = (vw - sw) / vw;
-    if(cropPercent > MAX_CROP_PERCENT){
+    if(cropPercent > MAX_CROP_PERCENT) {
       const allowedCrop = Math.round(vw * MAX_CROP_PERCENT);
       sw = vw - allowedCrop;
       sx = Math.round((vw - sw)/2);
     }
   } else {
+    // video taller -> crop top/bottom
     sh = Math.round(vw / targetAspect);
     sy = Math.round((vh - sh)/2);
     const cropPercent = (vh - sh) / vh;
@@ -189,10 +240,10 @@ function computeCoverCrop(vw, vh, targetW, targetH){
   return { sx, sy, sw, sh };
 }
 
-/* draw with limited cover cropping */
-function drawVideoCoverOnCanvasLimited(){
+/* draw video into canvas with computed crop */
+function drawVideoToCanvasCover() {
   if(!video || !video.videoWidth || !video.videoHeight) return;
-  updateCanvasSizeFromVideoAspect();
+  updateCanvasToLandscape();
   const cssW = canvas.clientWidth;
   const cssH = canvas.clientHeight;
   if(cssW === 0 || cssH === 0) return;
@@ -203,26 +254,26 @@ function drawVideoCoverOnCanvasLimited(){
   try{
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   }catch(e){
+    // fallback
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   }
 }
 
-/* onResults uses drawVideoCoverOnCanvasLimited and time-based logic */
+/* onResults: draw frame, landmarks and run time-based letter logic */
 function onResults(results){
-  // ensure correct canvas size (width-driven)
-  updateCanvasSizeFromVideoAspect();
-  ctx.save();
-  drawVideoCoverOnCanvasLimited();
+  // draw video frame cropped to landscape preview
+  drawVideoToCanvasCover();
 
   const now = performance.now();
 
   if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
     lastHandSeenAt = now;
     const handsArr = results.multiHandLandmarks;
-    drawLandmarksOnCanvasLimited(handsArr);
+    drawLandmarksMapped(handsArr);
     const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.clientWidth, y: lm.y * canvas.clientHeight})));
     const vec = twoHandsXYToVector(all_hands_px);
 
+    // prediction logic (keeps smoothing but not using confidence)
     let voted = null;
     if(weights){
       try{
@@ -231,13 +282,18 @@ function onResults(results){
         let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
         const probs = softmax(out2); const idx = argmax(probs);
         voted = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
-        recentPreds.push(voted); if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
+        recentPreds.push(voted);
+        if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
         const counts = {}; for(const v of recentPreds) counts[v] = (counts[v]||0)+1;
         let mv = recentPreds[recentPreds.length-1]; let maxc=0;
         for(const k in counts) if(counts[k] > maxc){ maxc = counts[k]; mv = k; }
         voted = mv;
-      }catch(e){ voted = null; }
-    } else { voted = null; }
+      }catch(e){
+        voted = null;
+      }
+    } else {
+      voted = null;
+    }
 
     labelEl.innerText = voted || '—';
 
@@ -252,27 +308,35 @@ function onResults(results){
             bufferEl.innerText = wordBuffer;
             lastAppendTime = now;
           }
-          candidateLabel = null; candidateStart = 0;
+          candidateLabel = null;
+          candidateStart = 0;
         }
       }
-    } else { candidateLabel = null; candidateStart = 0; }
+    } else {
+      candidateLabel = null;
+      candidateStart = 0;
+    }
 
   } else {
     labelEl.innerText = '—';
     if(now - lastHandSeenAt >= NO_HAND_MS && wordBuffer && (now - spaceInsertedAt > NO_HAND_MS)){
-      if(wordBuffer.slice(-1) !== ' '){ wordBuffer += ' '; bufferEl.innerText = wordBuffer; spaceInsertedAt = now; }
+      if(wordBuffer.slice(-1) !== ' '){
+        wordBuffer += ' ';
+        bufferEl.innerText = wordBuffer;
+        spaceInsertedAt = now;
+      }
     }
-    candidateLabel = null; candidateStart = 0;
+    candidateLabel = null;
+    candidateStart = 0;
   }
-
-  ctx.restore();
 }
 
-/* Draw landmarks mapped to limited-crop coordinates */
-function drawLandmarksOnCanvasLimited(handsArr){
+/* Map landmarks from video coordinates to canvas (taking crop into account) */
+function drawLandmarksMapped(handsArr){
   ctx.save();
   ctx.fillStyle='rgba(86,124,141,0.95)'; ctx.strokeStyle='rgba(86,124,141,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
+
   const cw = canvas.clientWidth; const ch = canvas.clientHeight;
   const vw = video.videoWidth || 1; const vh = video.videoHeight || 1;
   const crop = computeCoverCrop(vw, vh, cw, ch);
@@ -287,7 +351,8 @@ function drawLandmarksOnCanvasLimited(handsArr){
       const ay = ((a.y * vh) - sy) * scaleY;
       const bx = ((b.x * vw) - sx) * scaleX;
       const by = ((b.y * vh) - sy) * scaleY;
-      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
     }
   }
   ctx.stroke();
@@ -302,7 +367,7 @@ function drawLandmarksOnCanvasLimited(handsArr){
   ctx.restore();
 }
 
-/* vectorization for model */
+/* vectorization for model input */
 function twoHandsXYToVector(all_hands_px){
   if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
   function singleVec(pxs){
