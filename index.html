@@ -1,76 +1,146 @@
-<!doctype html>
+html = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>ISL Translator — Mobile</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
-  :root{ --bg:#071320; --accent:#00ffd1; --text:#e6eef8; --muted:#9fb0c6;}
-  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Arial;-webkit-font-smoothing:antialiased;}
-  .app{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:env(safe-area-inset-top) 12px 12px;box-sizing:border-box;}
-  .camera{width:100%;flex:1 1 auto;border-radius:12px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center;position:relative;}
-  canvas,video{width:100%;height:100%;object-fit:cover;display:block;}
-  .hud{width:100%;padding:12px 0;display:flex;flex-direction:column;gap:8px;align-items:center;}
-  .detected{font-size:48px;font-weight:800;color:var(--accent);letter-spacing:1px;}
-  .conf{font-size:16px;color:var(--muted)}
-  .bufferRow{width:100%;display:flex;gap:8px;align-items:center;justify-content:center}
-  .buffer{flex:1;font-size:18px;padding:10px;border-radius:10px;background:rgba(255,255,255,0.04);text-align:center;word-break:break-word;color:var(--accent);font-weight:700;min-height:48px}
-  .sendBtn{width:56px;height:48px;border-radius:10px;border:0;background:var(--accent);color:#002;font-weight:800;font-size:20px;cursor:pointer}
-  .bar{position:absolute;left:8px;top:8px;display:flex;gap:8px}
-  .bar button{padding:8px;border-radius:10px;border:0;background:rgba(255,255,255,0.05);color:var(--text)}
-  .perm{display:none;padding:10px;border-radius:8px;background:#08111a;color:var(--muted);margin:8px;}
+  :root{
+    --app-bg: #2f4156; /* main app background */
+    --accent: #567c8d; /* highlights */
+    --panel-bg: #f5efeb; /* light panel background */
+    --text: #ffffff; /* primary text */
+    --muted: rgba(255,255,255,0.7);
+    --bubble-deaf-bg: #567c8d;
+    --bubble-hear-bg: rgba(255,255,255,0.06);
+  }
+  html,body{height:100%;margin:0;background:var(--app-bg);color:var(--text);font-family:Inter,system-ui,Arial; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;}
+  .app{max-width:920px;margin:12px auto;padding:12px;box-sizing:border-box;}
+  /* Responsive split: camera + chat inside same container */
+  .container{display:grid;grid-template-columns:1fr;gap:12px;}
+  @media(min-width:900px){
+    .container{grid-template-columns: 1fr 420px; align-items:start;}
+  }
+
+  /* Camera / image area */
+  .camera-wrap{
+    background: linear-gradient(180deg, rgba(0,0,0,0.05), rgba(0,0,0,0.02));
+    border-radius:12px;
+    overflow:hidden;
+    min-height:320px;
+    position:relative;
+    border: 2px solid rgba(255,255,255,0.04);
+    display:flex;flex-direction:column;
+  }
+  .camera-canvas{width:100%;height:100%;display:block;background:var(--panel-bg);} /* when camera off, not black */
+  .controls-top{position:absolute;left:12px;top:12px;display:flex;gap:8px;z-index:40}
+  .ctrl-btn{padding:8px 10px;border-radius:8px;border:0;background:rgba(0,0,0,0.35);color:var(--text);cursor:pointer;backdrop-filter:blur(4px)}
+  .hud-bottom{position:relative;padding:12px;background:transparent;display:flex;flex-direction:column;gap:12px}
+
+  /* detection display */
+  .detected-large{font-size:48px;font-weight:800;color:var(--panel-bg);text-align:center}
+  /* buffer + send integrated */
+  .buffer-row{display:flex;gap:8px;align-items:center;justify-content:center}
+  .buffer{flex:1;padding:12px;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--panel-bg);font-weight:700;min-height:48px;text-align:center}
+  .send-btn{width:56px;height:48px;border-radius:10px;border:0;background:var(--accent);color:var(--text);font-weight:800;font-size:20px;cursor:pointer}
+
+  /* Chat panel */
+  .chat-panel{background:transparent;border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:12px}
+  .chat-window{background:rgba(0,0,0,0.06);padding:12px;border-radius:10px;max-height:58vh;overflow:auto}
+  .chat-controls{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .mic-btn{width:56px;height:56px;border-radius:12px;border:0;background:var(--accent);color:var(--text);font-size:18px;cursor:pointer}
+  .input{flex:1;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:var(--text)}
+  .send-local{padding:10px 12px;border-radius:10px;border:0;background:var(--accent);color:var(--text);cursor:pointer}
+  .clear-chat{padding:8px 10px;border-radius:8px;border:0;background:rgba(255,255,255,0.04);color:var(--text);cursor:pointer;margin-left:auto}
+  /* bubbles */
+  .bubble{padding:10px;border-radius:10px;margin-bottom:8px;word-break:break-word;max-width:85%}
+  .bubble.deaf{background:var(--bubble-deaf-bg);color:#042026;align-self:flex-start}
+  .bubble.hear{background:var(--bubble-hear-bg);color:var(--text);align-self:flex-end}
+
+  /* small text */
+  .small{font-size:13px;color:var(--muted)}
+
+  /* permission hint */
+  .perm{padding:10px;border-radius:8px;background:rgba(0,0,0,0.4);color:var(--panel-bg);margin:8px;display:none}
+
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="camera" id="camWrap">
-    <video id="video" autoplay playsinline muted style="display:none"></video>
-    <canvas id="canvas" width="360" height="640"></canvas>
+  <div class="app">
+    <div class="container">
+      <!-- Camera + buffer integrated -->
+      <div class="camera-wrap" id="cameraWrap">
+        <div class="controls-top">
+          <button class="ctrl-btn" id="start">Start</button>
+          <button class="ctrl-btn" id="stop">Stop</button>
+          <button class="ctrl-btn" id="clearBufferBtn">Clear</button>
+        </div>
 
-    <div class="bar">
-      <button id="start">Start</button>
-      <button id="stop">Stop</button>
-      <button id="clear">Clear</button>
+        <video id="video" autoplay playsinline muted style="display:none"></video>
+        <canvas id="canvas" class="camera-canvas" width="640" height="480"></canvas>
+
+        <div class="hud-bottom">
+          <div style="display:flex;align-items:center;justify-content:center;">
+            <div class="detected-large" id="label">—</div>
+          </div>
+
+          <div class="buffer-row">
+            <div id="buffer" class="buffer" aria-live="polite">—</div>
+            <button id="sendBtn" class="send-btn" title="Send">→</button>
+          </div>
+        </div>
+
+        <div class="perm" id="perm">Camera permission appears blocked. Tap Start then allow camera in your browser settings.</div>
+      </div>
+
+      <!-- Chat panel (hearing user controls and chat) -->
+      <div class="chat-panel">
+        <div style="font-weight:700">Conversation</div>
+        <div class="chat-window" id="chatWindow" aria-live="polite"></div>
+
+        <div class="chat-controls">
+          <button id="micBtn" class="mic-btn" title="Tap to talk">🎤</button>
+          <input id="transcript" class="input" placeholder="Type or speak a message..." />
+          <button id="localSend" class="send-local">Send</button>
+          <button id="clearChat" class="clear-chat">Clear Chat</button>
+        </div>
+        <div class="small">Tip: Hold a letter steady for 2s to add it to the buffer. Remove hands for 2s to insert a space.</div>
+      </div>
     </div>
-
-    <div class="perm" id="perm">Camera blocked. Allow camera in browser or embed iframe must allow camera.</div>
   </div>
 
-  <div class="hud">
-    <div class="detected" id="label">—</div>
-    <div class="conf" id="conf">Confidence: —</div>
-
-    <div class="bufferRow">
-      <div id="buffer" class="buffer" aria-live="polite">—</div>
-      <button id="sendBtn" class="sendBtn" title="Send">→</button>
-    </div>
-  </div>
-</div>
-
+<!-- mediapipe -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
 <script>
-/* MOBILE-FIRST: time-based stability (2s rules), no dependence on confidence */
-const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
+/* Time-based stability (2s) and integrated chat + STT/TTS. No confidence gating. */
 const INFER_FPS = 12;
-const LETTER_HOLD_MS = 2000; // 2 seconds to accept a stable letter
-const NO_HAND_MS = 2000;     // 2 seconds of no hands -> insert single space
-const SMOOTH_WINDOW = 4;     // still use smoothing for voted label derivation
+const LETTER_HOLD_MS = 2000;
+const NO_HAND_MS = 2000;
+const SMOOTH_WINDOW = 4;
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
-const clearBtn = document.getElementById('clear');
+const clearBufferBtn = document.getElementById('clearBufferBtn');
 const labelEl = document.getElementById('label');
-const confEl = document.getElementById('conf');
 const bufferEl = document.getElementById('buffer');
 const perm = document.getElementById('perm');
 const sendBtn = document.getElementById('sendBtn');
 
+const chatWindow = document.getElementById('chatWindow');
+const micBtn = document.getElementById('micBtn');
+const transcript = document.getElementById('transcript');
+const localSend = document.getElementById('localSend');
+const clearChat = document.getElementById('clearChat');
+
 let weights=null, classes=null;
 (async function loadW(){
+  const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
   for(const n of MODEL_FILES){
     try{ const r=await fetch(n); if(!r.ok) continue; const j=await r.json(); weights=j; classes=j.classes||null; return; }catch(e){}
   }
@@ -81,22 +151,22 @@ function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-/* mediapipe setup */
+/* mediapipe hands */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
-/* UI state / timing variables */
+/* state */
 let recentPreds = [];
 let wordBuffer = '';
-let lastVoted = null;            // last voted label (majority)
-let candidateLabel = null;       // current candidate being timed
-let candidateStart = 0;          // timestamp when candidate started
-let lastHandSeenAt = 0;          // timestamp of last hand detection
-let spaceInsertedAt = 0;         // timestamp when last space inserted (prevents repeats)
-let lastAppendTime = 0;          // last time we appended a letter
-let lastCanvasUpdate = 0;
+let candidateLabel = null;
+let candidateStart = 0;
+let lastHandSeenAt = 0;
+let spaceInsertedAt = 0;
+let lastAppendTime = 0;
+let lastTick = 0;
 
+/* CAMERA CONTROL */
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
@@ -111,20 +181,18 @@ startBtn.onclick = async () => {
   }
 };
 stopBtn.onclick = ()=>{ if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; } };
-clearBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText=''; };
+clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
 
+/* send button (flush) */
 sendBtn.onclick = ()=> {
   const text = wordBuffer.trim();
   if(!text) return;
-  // emit a WORD detection and a MESSAGE for parent
-  try{ parent.postMessage({ type:'DETECTION', payload:{ tokenType:'WORD', value:text, time: Date.now() } }, '*'); }catch(e){}
-  try{ parent.postMessage({ type:'MESSAGE', payload:{ text, source:'DEAF', time: Date.now() } }, '*'); }catch(e){}
-  // visual feedback: clear buffer
-  wordBuffer=''; bufferEl.innerText='';
+  addChatBubble(text, 'DEAF');
+  try{ const u = new SpeechSynthesisUtterance(text); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){}
+  wordBuffer=''; bufferEl.innerText='—';
 };
 
-/* throttle inference rendering */
-let lastTick = 0;
+/* main loop throttle */
 async function tick(ts){
   requestAnimationFrame(tick);
   const dt = ts - lastTick;
@@ -133,9 +201,9 @@ async function tick(ts){
   if(video.readyState >= 2) await hands.send({image: video});
 }
 
-/* onResults: compute majority-voted label as before, but ignore confidence for append logic */
+/* onResults: run model if available, compute voted label (majority), use time-based 2s rules */
 function onResults(results){
-  // canvas sizing responsive
+  // canvas sizing
   canvas.width = canvas.clientWidth;
   canvas.height = canvas.clientHeight;
 
@@ -146,82 +214,71 @@ function onResults(results){
   const now = performance.now();
 
   if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
-    // hands present
     lastHandSeenAt = now;
-
     const handsArr = results.multiHandLandmarks;
     drawLandmarks(handsArr);
     const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.width, y: lm.y * canvas.height})));
     const vec = twoHandsXYToVector(all_hands_px);
 
-    // compute voted label (majority of recent predictions) — this part still uses weights if available
+    // compute voted label using weights if present
     let voted = null;
     if(weights){
-      let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
-      let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
-      let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
-      const probs = softmax(out2); const idx = argmax(probs);
-      voted = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
-      // update recentPreds buffer for smoothing / majority
-      recentPreds.push(voted);
-      if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
-      // majority vote
-      const counts = {}; for(const v of recentPreds) counts[v] = (counts[v]||0)+1;
-      let mv = recentPreds[recentPreds.length-1];
-      let maxc=0;
-      for(const k in counts) if(counts[k] > maxc){ maxc = counts[k]; mv = k; }
-      voted = mv;
+      try{
+        let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
+        let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
+        let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
+        const probs = softmax(out2); const idx = argmax(probs);
+        voted = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
+        recentPreds.push(voted);
+        if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
+        const counts = {}; for(const v of recentPreds) counts[v] = (counts[v]||0)+1;
+        let mv = recentPreds[recentPreds.length-1]; let maxc=0;
+        for(const k in counts) if(counts[k] > maxc){ maxc = counts[k]; mv = k; }
+        voted = mv;
+      }catch(e){
+        // fallback
+        voted = null;
+      }
     } else {
-      // if no weights, keep lastVoted or null
-      voted = lastVoted;
+      voted = null;
     }
 
-    // update displayed label (UI)
+    // show candidate label
     labelEl.innerText = voted || '—';
-    confEl.innerText = 'Confidence: —';
 
-    // TIME-BASED STABILITY (2s): if voted stays the same for LETTER_HOLD_MS we append it
+    // time-based stability
     if(voted){
       if(candidateLabel !== voted){
         candidateLabel = voted;
         candidateStart = now;
       } else {
-        // same candidate continuing
         if(now - candidateStart >= LETTER_HOLD_MS){
-          // Append the letter (only once)
-          // Prevent rapid re-appending: require candidate reset afterwards
-          if(now - lastAppendTime > 300){ // small debounce
+          if(now - lastAppendTime > 300){
             wordBuffer += candidateLabel;
             bufferEl.innerText = wordBuffer;
-            try{ parent.postMessage({ type:'DETECTION', payload:{ tokenType:'LETTER', value: candidateLabel, time: Date.now() } }, '*'); }catch(e){}
             lastAppendTime = now;
           }
-          // reset candidate so user must hold again for next char
+          // reset candidate to force fresh hold for next char
           candidateLabel = null;
           candidateStart = 0;
         }
       }
     } else {
-      // no voted label; reset candidate
       candidateLabel = null;
       candidateStart = 0;
     }
 
   } else {
-    // no hands present
+    // no hands
     labelEl.innerText = '—';
-    confEl.innerText = 'Confidence: —';
-    // start no-hand timer: if no hands for NO_HAND_MS, append space once (only if buffer not empty)
+    // if no hands for NO_HAND_MS, append space once
     if(now - lastHandSeenAt >= NO_HAND_MS && wordBuffer && (now - spaceInsertedAt > NO_HAND_MS)){
-      // append single space
       if(wordBuffer.slice(-1) !== ' '){
         wordBuffer += ' ';
         bufferEl.innerText = wordBuffer;
-        try{ parent.postMessage({ type:'DETECTION', payload:{ tokenType:'SPACE', value:' ', time: Date.now() } }, '*'); }catch(e){}
         spaceInsertedAt = now;
       }
     }
-    // reset candidate tracking
     candidateLabel = null;
     candidateStart = 0;
   }
@@ -229,7 +286,7 @@ function onResults(results){
   ctx.restore();
 }
 
-/* --- vectorization & drawing (unchanged) --- */
+/* vectorization and drawing */
 function twoHandsXYToVector(all_hands_px){
   if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
   function singleVec(pxs){
@@ -245,7 +302,7 @@ function twoHandsXYToVector(all_hands_px){
   const concat = new Float32Array(84); concat.set(v1,0); concat.set(v2,42); return concat;
 }
 function drawLandmarks(handsArr){
-  ctx.fillStyle='rgba(0,200,255,0.9)'; ctx.strokeStyle='rgba(0,255,170,0.9)'; ctx.lineWidth=2;
+  ctx.fillStyle='rgba(86,124,141,0.95)'; ctx.strokeStyle='rgba(86,124,141,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
   ctx.beginPath();
   for(const hand of handsArr){
@@ -264,8 +321,60 @@ function drawLandmarks(handsArr){
   }
 }
 
-/* quick permission hint */
+/* permission hint */
 (async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') perm.style.display='block'; }catch(e){} })();
+
+/* CHAT helpers */
+function addChatBubble(text, who='DEAF'){
+  const el = document.createElement('div');
+  el.className = 'bubble ' + (who === 'DEAF' ? 'deaf' : 'hear');
+  el.innerHTML = (who === 'DEAF' ? '<strong>DEAF →</strong> ' : '<strong>HEARING →</strong> ') + escapeHtml(text);
+  chatWindow.appendChild(el);
+  chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (m)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+/* STT (hearing user) */
+let recognition = null;
+let listening = false;
+if('webkitSpeechRecognition' in window || 'SpeechRecognition' in window){
+  const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new Rec();
+  recognition.lang = 'en-US';
+  recognition.interimResults = true;
+  recognition.onresult = (ev) => {
+    let interim = '';
+    let finalTrans = '';
+    for(let i=0;i<ev.results.length;i++){
+      const r = ev.results[i];
+      if(r.isFinal) finalTrans += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    transcript.value = (finalTrans + interim).trim();
+  };
+  recognition.onend = ()=> { listening=false; micBtn.style.opacity=1; micBtn.innerText='🎤'; };
+  recognition.onerror = (e)=> { console.warn('STT error', e); listening=false; micBtn.style.opacity=1; micBtn.innerText='🎤'; };
+} else {
+  micBtn.disabled = true; micBtn.title = 'SpeechRecognition not supported';
+}
+micBtn.addEventListener('click', ()=>{
+  if(!recognition) return;
+  if(!listening){ recognition.start(); listening=true; micBtn.style.opacity=0.8; micBtn.innerText='●'; }
+  else { recognition.stop(); listening=false; micBtn.style.opacity=1; micBtn.innerText='🎤'; }
+});
+
+/* local send */
+localSend.addEventListener('click', ()=>{
+  const t = transcript.value.trim();
+  if(!t) return;
+  addChatBubble(t, 'HEARING');
+  try{ const u = new SpeechSynthesisUtterance(t); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){}
+  transcript.value = '';
+});
+
+/* clear chat */
+clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
+
 </script>
 </body>
 </html>
