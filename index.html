@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Fixed Scale</title>
+<title>ISL Translator — Simple Stretch</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -20,14 +20,15 @@
   .container{display:grid;grid-template-columns:1fr;gap:12px;}
   @media(min-width:900px){ .container{grid-template-columns: 1fr 420px; align-items:start;} }
 
-  .camera-wrap{ background: var(--accent); border-radius:12px; overflow:hidden; position:relative; border: 2px solid rgba(255,255,255,0.04); display:flex;flex-direction:column; min-height:0; align-items:center; }
-  /* The visible canvas */
-  #canvas{width:100%;height:auto;display:block;background:var(--accent);}
+  .camera-wrap{ background: #000; border-radius:12px; overflow:hidden; position:relative; border: 2px solid rgba(255,255,255,0.04); display:flex;flex-direction:column; min-height:0; align-items:center; }
+  
+  /* Canvas fills the container */
+  #canvas{width:100%;height:100%;display:block;background:#000; object-fit: fill;}
   
   .controls-top{position:absolute;left:12px;top:12px;display:flex;gap:8px;z-index:40}
   .ctrl-btn{padding:8px 10px;border-radius:8px;border:0;background:rgba(0,0,0,0.35);color:var(--text);cursor:pointer}
   
-  .hud-bottom{position:relative;padding:12px;background:transparent;display:flex;flex-direction:column;gap:12px;width:100%}
+  .hud-bottom{position:relative;padding:12px;background:var(--app-bg);display:flex;flex-direction:column;gap:12px;width:100%; box-sizing: border-box;}
   .detected-large{font-size:40px;font-weight:800;color:var(--text);text-align:center}
   
   .buffer-row{display:flex;gap:8px;align-items:center;justify-content:center}
@@ -97,12 +98,10 @@
 
 <script>
 /* ---------------- CONFIG ---------------- */
-const PROC_SIZE = 640;   // Internal processing resolution
-const INFER_FPS = 12;
+const INFER_FPS = 15; // Slightly faster since no offscreen drawing
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MIRROR = true; // Flips the visible canvas horizontally for a mirror effect
 let rafId = null;
 
 /* ---------------- DOM ---------------- */
@@ -123,15 +122,6 @@ const transcript = document.getElementById('transcript');
 const localSend = document.getElementById('localSend');
 const clearChat = document.getElementById('clearChat');
 
-/* ---------------- Offscreen Processing Canvas ----------------
-   We draw the raw video here first to scale it down/fit it to square.
-   Mediapipe reads from this canvas.
-*/
-const off = document.createElement('canvas');
-const offCtx = off.getContext('2d');
-off.width = PROC_SIZE;
-off.height = PROC_SIZE;
-
 /* ---------------- Model Loader ---------------- */
 let weights=null, classes=null;
 (async function loadW(){
@@ -141,15 +131,14 @@ let weights=null, classes=null;
   }
 })();
 
-/* ---------------- Neural Net Maths ---------------- */
 function denseForward(x,kernel,bias){ const inD=kernel.length, outD=kernel[0].length; const out=new Float32Array(outD); for(let j=0;j<outD;j++){ let s=0; for(let i=0;i<inD;i++) s+=x[i]*kernel[i][j]; s+=bias[j]; out[j]=s;} return out;}
 function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-/* ---------------- Mediapipe Setup ---------------- */
+/* ---------------- Mediapipe ---------------- */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
 /* ---------------- State Vars ---------------- */
@@ -162,41 +151,14 @@ let spaceInsertedAt = 0;
 let lastAppendTime = 0;
 let lastTick = 0;
 
-/* ---------------- Responsive Canvas Sizing ---------------- */
-function updateCanvasSquare(){
-  const container = document.getElementById('cameraWrap');
-  if(!container) return;
-  const dpr = window.devicePixelRatio || 1;
-  
-  // We want a square visible canvas
-  const cw = Math.min(container.clientWidth, 720);
-  const cssSize = cw;
-  
-  canvas.style.width = cssSize + 'px';
-  canvas.style.height = cssSize + 'px';
-  canvas.width = Math.round(cssSize * dpr);
-  canvas.height = Math.round(cssSize * dpr);
-  
-  // Apply visual mirror if enabled.
-  // Note: We only mirror the visible canvas, not the processing one.
-  ctx.setTransform(dpr * (MIRROR ? -1 : 1), 0, 0, dpr, MIRROR ? canvas.width : 0, 0);
-}
-window.addEventListener('resize', updateCanvasSquare);
-updateCanvasSquare();
-
 /* ---------------- Start Camera ---------------- */
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
-    // FIX 1: Request standard aspect ratio (1280x720) instead of square
-    // This prevents iPhone from cropping the sensor to force a square.
+    // REVERTED TO OLD LOGIC: No specific width/height.
+    // This allows iPhone to pick the native sensor ratio (no zoom).
     const constraints = { 
-        video: { 
-            facingMode: 'user', 
-            width: { ideal: 1280 }, 
-            height: { ideal: 720 }, // Standard aspect ratio
-            frameRate: { ideal: 30 } 
-        }, 
+        video: { facingMode: 'user' }, 
         audio: false 
     };
     
@@ -204,10 +166,14 @@ startBtn.onclick = async () => {
     video.srcObject = stream;
     await video.play();
 
-    // FIX 2: Removed the code block that tried to applyConstraints() later.
-    // That block was causing the re-zoom.
-
-    video.addEventListener('loadedmetadata', () => { updateCanvasSquare(); }, { once: true });
+    // Sizing: Match canvas internal res to CSS display size
+    // We just want it to fill the square box, stretching if needed.
+    const container = document.getElementById('cameraWrap');
+    const dpr = window.devicePixelRatio || 1;
+    // We force a square or rectangle based on the container, but usually square in this UI
+    // Let's just fix it to 640 for internal processing to keep it simple
+    canvas.width = 640;
+    canvas.height = 640; 
 
     lastTick = performance.now();
     if(!rafId) rafId = requestAnimationFrame(tick);
@@ -244,69 +210,41 @@ async function tick(ts){
   lastTick = ts;
 
   if(video.readyState >= 2){
-    // 1. Draw video to offscreen (resizing logic)
-    drawVideoToOffscreenContain();
-
-    // 2. Send to Mediapipe
-    await hands.send({ image: off });
+    // DIRECT FEED: Old way. No offscreen canvas.
+    await hands.send({ image: video });
   }
 }
 
-/* ---------------- ROBUST SCALING LOGIC ---------------- 
-   This function ensures the video fits inside the square (offscreen)
-   without cropping or zooming, regardless of whether it's 
-   Portrait or Landscape input.
-*/
-function drawVideoToOffscreenContain(){
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  if(!vw || !vh) return;
-
-  const tW = off.width;
-  const tH = off.height;
-
-  // FIX 3: Robust "Contain" Math
-  // Calculate scale to fit video entirely inside the box
-  const scale = Math.min(tW / vw, tH / vh);
-
-  const dw = Math.round(vw * scale);
-  const dh = Math.round(vh * scale);
-
-  // Center the image
-  const dx = Math.round((tW - dw) / 2);
-  const dy = Math.round((tH - dh) / 2);
-
-  // Clear and fill background (bars)
-  offCtx.clearRect(0,0,tW,tH);
-  offCtx.fillStyle = '#2f4156'; // Match app bg color for bars
-  offCtx.fillRect(0,0,tW,tH);
-
-  try {
-    offCtx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
-  } catch(e){
-    // Fallback
-    offCtx.drawImage(video, 0, 0, tW, tH);
-  }
-
-  // Store draw info so we can map landmarks back to visible canvas later
-  off._lastDrawInfo = { vw, vh, tW, tH, dx, dy, dw, dh };
-}
-
-/* ---------------- Draw Results to Visible Canvas ---------------- */
+/* ---------------- Draw & Predict (OLD WAY) ---------------- */
 function onResults(results){
-  // 1. Copy the processed offscreen image to the visible canvas
-  drawOffscreenToVisible();
+  // 1. CLEAR & SETUP
+  const w = canvas.width;
+  const h = canvas.height;
+  
+  ctx.save();
+  ctx.clearRect(0, 0, w, h);
+  
+  // 2. MIRROR & STRETCH
+  // This matches your old code logic: scale -1,1
+  ctx.translate(w, 0);
+  ctx.scale(-1, 1);
+  
+  // 3. DRAW VIDEO DIRECTLY (STRETCH TO FIT)
+  if(video.readyState >= 2){
+    ctx.drawImage(video, 0, 0, w, h);
+  }
 
+  // 4. DRAW LANDMARKS
   const now = performance.now();
   if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
     lastHandSeenAt = now;
     const handsArr = results.multiHandLandmarks;
-    
-    // 2. Draw landmarks
-    drawLandmarksFromOffscreen(handsArr);
-    
-    // 3. Prediction Logic
-    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * off.width, y: lm.y * off.height})));
+
+    drawLandmarksSimple(handsArr, w, h);
+
+    // 5. PREDICTION
+    // Convert landmarks (0-1) to pixels (0-w, 0-h)
+    const all_hands_px = handsArr.map(hand => hand.map(lm => ({ x: lm.x * w, y: lm.y * h })));
     const vec = twoHandsXYToVector(all_hands_px);
 
     let voted = null;
@@ -351,86 +289,32 @@ function onResults(results){
     }
     candidateLabel = null; candidateStart = 0;
   }
+  
+  ctx.restore();
 }
 
-/* ---------------- Draw Offscreen -> Visible (Contain) ---------------- */
-function drawOffscreenToVisible(){
-  // Ensure visible canvas is sized correctly
-  updateCanvasSquare(); 
-  
-  const info = off._lastDrawInfo || { tW: off.width, tH: off.height, dx:0, dy:0, dw:off.width, dh:off.height };
-  const cssW = canvas.clientWidth; 
-  const cssH = canvas.clientHeight; // This will be square due to CSS logic
-  
-  // We want to fit 'off' (PROC_SIZE x PROC_SIZE) into visible (cssW x cssH)
-  // Since both are square (conceptually), it's usually 1:1, but we do safe contain anyway.
-  
-  const srcW = off.width;
-  const srcH = off.height;
-  
-  // Since both are square, scale is simple
-  const scale = Math.min(cssW / srcW, cssH / srcH);
-  
-  const dw = Math.round(srcW * scale);
-  const dh = Math.round(srcH * scale);
-  const dx = Math.round((cssW - dw)/2);
-  const dy = Math.round((cssH - dh)/2);
-
-  const dpr = window.devicePixelRatio || 1;
-  const destX = Math.round(dx * dpr);
-  const destY = Math.round(dy * dpr);
-  const destW = Math.round(dw * dpr);
-  const destH = Math.round(dh * dpr);
-
-  try {
-    ctx.drawImage(off, 0, 0, srcW, srcH, destX, destY, destW, destH);
-  } catch(e){
-    // Fallback
-    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
-    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
-    // Restore mirror transform
-    ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
-  }
-
-  // Save info for landmark drawing (mapping offscreen px -> visible px)
-  canvas._lastDrawInfo = { offW: srcW, offH: srcH, destX, destY, destW, destH, cssW, cssH };
-}
-
-/* ---------------- Draw Landmarks ---------------- */
-function drawLandmarksFromOffscreen(handsArr){
-  const info = canvas._lastDrawInfo;
-  if(!info) return;
-  ctx.save();
-  ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
+/* ---------------- Simple Drawing Util ---------------- */
+function drawLandmarksSimple(handsArr, w, h){
+  ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
 
-  const destXpx = info.destX;
-  const destYpx = info.destY;
-  // Calculate scale relative to the internal Processing Size
-  const scaleXpx = info.destW / info.offW;
-  const scaleYpx = info.destH / info.offH;
-
-  ctx.beginPath();
   for(const hand of handsArr){
     for(const c of connections){
       const a = hand[c[0]], b = hand[c[1]];
-      const ax = destXpx + (a.x * info.offW) * scaleXpx;
-      const ay = destYpx + (a.y * info.offH) * scaleYpx;
-      const bx = destXpx + (b.x * info.offW) * scaleXpx;
-      const by = destYpx + (b.y * info.offH) * scaleYpx;
-      ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+      // Note: Landmarks are already normalized 0-1, so we just multiply by w/h
+      // Because we are inside the transformed context (mirror), we just draw normally.
+      ctx.beginPath();
+      ctx.moveTo(a.x * w, a.y * h);
+      ctx.lineTo(b.x * w, b.y * h);
+      ctx.stroke();
     }
-  }
-  ctx.stroke();
-  for(const hand of handsArr){
     for(let i=0;i<hand.length;i++){
       const p = hand[i];
-      const px = destXpx + (p.x * info.offW) * scaleXpx;
-      const py = destYpx + (p.y * info.offH) * scaleYpx;
-      ctx.beginPath(); ctx.arc(px, py, i===8?6:4,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); 
+      ctx.arc(p.x * w, p.y * h, i===8?6:4, 0, Math.PI*2); 
+      ctx.fill();
     }
   }
-  ctx.restore();
 }
 
 /* ---------------- Vectorization ---------------- */
