@@ -116,7 +116,7 @@ const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
 const MAX_CROP_PERCENT = 0.12; // tighter cap to avoid over-zoom on iPhone
-const MIRROR = false; // set true to mirror horizontally
+const MIRROR = true; // set true to mirror horizontally
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -418,3 +418,4 @@ clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
 </html>
+
