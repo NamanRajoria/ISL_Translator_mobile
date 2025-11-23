@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Mobile (Square Preview) — Contain Mode</title>
+<title>ISL Translator — Downscaled Processing (Contain)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -20,28 +20,15 @@
   .container{display:grid;grid-template-columns:1fr;gap:12px;}
   @media(min-width:900px){ .container{grid-template-columns: 1fr 420px; align-items:start;} }
 
-  /* Camera / image area */
-  .camera-wrap{
-    background: var(--accent); /* requested accent background when camera off */
-    border-radius:12px;
-    overflow:hidden;
-    position:relative;
-    border: 2px solid rgba(255,255,255,0.04);
-    display:flex;flex-direction:column;
-    min-height:0;
-    align-items:center;
-  }
-  /* square preview */
+  .camera-wrap{ background: var(--accent); border-radius:12px; overflow:hidden; position:relative; border: 2px solid rgba(255,255,255,0.04); display:flex;flex-direction:column; min-height:0; align-items:center; }
   #canvas{width:100%;height:auto;display:block;background:var(--accent);}
   .controls-top{position:absolute;left:12px;top:12px;display:flex;gap:8px;z-index:40}
   .ctrl-btn{padding:8px 10px;border-radius:8px;border:0;background:rgba(0,0,0,0.35);color:var(--text);cursor:pointer}
   .hud-bottom{position:relative;padding:12px;background:transparent;display:flex;flex-direction:column;gap:12px;width:100%}
-
   .detected-large{font-size:40px;font-weight:800;color:var(--text);text-align:center}
   .buffer-row{display:flex;gap:8px;align-items:center;justify-content:center}
   .buffer{flex:1;padding:12px;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--text);font-weight:700;min-height:48px;text-align:center}
   .send-btn{width:56px;height:48px;border-radius:10px;border:0;background:var(--panel-bg);color:#042026;font-weight:800;font-size:20px;cursor:pointer}
-
   .chat-panel{background:transparent;border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:12px}
   .chat-window{background:rgba(0,0,0,0.06);padding:12px;border-radius:10px;max-height:58vh;overflow:auto}
   .chat-controls{display:flex;gap:8px;align-items:center;margin-top:8px}
@@ -69,14 +56,12 @@
         </div>
 
         <video id="video" autoplay playsinline muted style="display:none"></video>
-        <!-- square canvas preview -->
         <canvas id="canvas" width="640" height="640" aria-label="Camera preview"></canvas>
 
         <div class="hud-bottom">
           <div style="display:flex;align-items:center;justify-content:center;">
             <div class="detected-large" id="label">—</div>
           </div>
-
           <div class="buffer-row">
             <div id="buffer" class="buffer" aria-live="polite">—</div>
             <button id="sendBtn" class="send-btn" title="Send">→</button>
@@ -102,18 +87,18 @@
   </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
 <script>
-/* --- Config --- */
+/* ---------------- CONFIG ---------------- */
+const PROC_SIZE = 640;   // processing size (offscreen). Lower = less CPU, less "zoom" from huge camera frames.
 const INFER_FPS = 12;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MIRROR = true; // preview mirror for user (canvas flips horizontally)
+const MIRROR = true; // visual mirror of visible canvas (user-facing)
 let rafId = null;
 
-/* --- DOM --- */
+/* ---------------- DOM ---------------- */
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -131,7 +116,16 @@ const transcript = document.getElementById('transcript');
 const localSend = document.getElementById('localSend');
 const clearChat = document.getElementById('clearChat');
 
-/* --- Model loader (unchanged) --- */
+/* ---------------- offscreen processing canvas ----------------
+   We'll draw the full video into this offscreen canvas at PROC_SIZE x PROC_SIZE
+   using contain (no crop). Mediapipe will receive this canvas as the image source.
+*/
+const off = document.createElement('canvas');
+const offCtx = off.getContext('2d');
+off.width = PROC_SIZE;
+off.height = PROC_SIZE;
+
+/* ---------------- model loader (kept simple) ---------------- */
 let weights=null, classes=null;
 (async function loadW(){
   const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
@@ -145,12 +139,12 @@ function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-/* --- Mediapipe: selfieMode:false so landmarks use camera coords (avoid double mirror) --- */
+/* ---------------- Mediapipe: selfieMode:false (landmarks in camera coords) ---------------- */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
-/* --- state --- */
+/* ---------------- state vars ---------------- */
 let recentPreds = [];
 let wordBuffer = '';
 let candidateLabel = null;
@@ -160,38 +154,37 @@ let spaceInsertedAt = 0;
 let lastAppendTime = 0;
 let lastTick = 0;
 
-/* --- sizing & transform centralization --- */
+/* ---------------- central transform/sizing for visible canvas ---------------- */
 function updateCanvasSquare(){
   const container = document.getElementById('cameraWrap');
   if(!container) return;
   const dpr = window.devicePixelRatio || 1;
-  const cw = Math.min(container.clientWidth, 720); // cap width so canvas isn't huge
+  const cw = Math.min(container.clientWidth, 720);
   const cssSize = cw;
   canvas.style.width = cssSize + 'px';
   canvas.style.height = cssSize + 'px';
   canvas.width = Math.round(cssSize * dpr);
   canvas.height = Math.round(cssSize * dpr);
-
   // central transform: scale for dpr and optionally flip horizontally for mirror
   ctx.setTransform(dpr * (MIRROR ? -1 : 1), 0, 0, dpr, MIRROR ? canvas.width : 0, 0);
 }
 window.addEventListener('resize', updateCanvasSquare);
 updateCanvasSquare();
 
-/* --- Start / Stop camera --- */
+/* ---------------- Start camera pipeline ---------------- */
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
-    const constraints = { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 }, frameRate: { ideal: 30 } }, audio: false };
+    const constraints = { video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } }, audio: false };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
     await video.play();
 
-    // best-effort attempt to apply constraints (some browsers ignore)
+    // Best-effort apply lower constraints (some browsers ignore)
     try{
       const [track] = stream.getVideoTracks();
       if(track && track.applyConstraints){
-        await track.applyConstraints({ width: 640, height: 640, aspectRatio: 1.0 });
+        await track.applyConstraints({ width: PROC_SIZE, height: PROC_SIZE, aspectRatio: 1.0 });
       }
       const settings = track.getSettings ? track.getSettings() : {};
       console.log('Camera settings:', settings);
@@ -210,18 +203,13 @@ startBtn.onclick = async () => {
 
 stopBtn.onclick = ()=> {
   if(video.srcObject){
-    try{
-      video.srcObject.getTracks().forEach(t=>t.stop());
-    }catch(e){}
+    try{ video.srcObject.getTracks().forEach(t=>t.stop()); }catch(e){}
     video.srcObject = null;
   }
-  if(rafId){
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
+  if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
 };
 
-/* --- Controls --- */
+/* ---------------- Controls ---------------- */
 clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
 sendBtn.onclick = ()=> {
   const text = wordBuffer.trim();
@@ -231,80 +219,79 @@ sendBtn.onclick = ()=> {
   wordBuffer=''; bufferEl.innerText='—';
 };
 
-/* --- Main loop --- */
+/* ---------------- main tick: downscale -> send to Mediapipe ---------------- */
 async function tick(ts){
   rafId = requestAnimationFrame(tick);
   const dt = ts - lastTick;
   if(dt < (1000/INFER_FPS)) return;
   lastTick = ts;
-  if(video.readyState >= 2) {
-    await hands.send({image: video});
+
+  if(video.readyState >= 2){
+    // 1) draw the full video into offscreen at PROC_SIZE using contain (no crop)
+    drawVideoToOffscreenContain();
+
+    // 2) send the offscreen (lower-res) canvas to Mediapipe for processing
+    await hands.send({ image: off });
+
+    // note: onResults will be called by Mediapipe which will draw the offscreen into visible canvas
   }
 }
 
-/* ===== compute contain (draw full video inside canvas, no crop) ===== */
-function computeContain(vw, vh, targetW, targetH){
-  const videoAspect = vw / vh;
-  const targetAspect = targetW / targetH;
+/* ---------------- draw video into offscreen using contain (no crop) ---------------- */
+function drawVideoToOffscreenContain(){
+  const vw = video.videoWidth || 1;
+  const vh = video.videoHeight || 1;
+  const tW = off.width;
+  const tH = off.height;
+
+  // compute contain dest on offscreen
+  const vA = vw / vh;
+  const tA = tW / tH;
   let dw, dh, dx, dy;
-  if(videoAspect > targetAspect){
-    // video is wider: fit height
-    dh = targetH;
-    dw = Math.round(dh * videoAspect);
-    dx = Math.round((targetW - dw) / 2);
+  if(vA > tA){
+    // video wider: fit height
+    dh = tH;
+    dw = Math.round(dh * vA);
+    dx = Math.round((tW - dw) / 2);
     dy = 0;
   } else {
-    // video is taller or equal: fit width
-    dw = targetW;
-    dh = Math.round(dw / videoAspect);
+    // video taller: fit width
+    dw = tW;
+    dh = Math.round(dw / vA);
     dx = 0;
-    dy = Math.round((targetH - dh) / 2);
+    dy = Math.round((tH - dh) / 2);
   }
-  return {
-    sx: 0, sy: 0, sw: vw, sh: vh,
-    dx, dy, dw, dh,
-    scaleX: dw / vw,
-    scaleY: dh / vh
-  };
+
+  // clear offscreen
+  offCtx.clearRect(0,0,tW,tH);
+  // fill background (accent) so letterbox visible
+  offCtx.fillStyle = '#567c8d';
+  offCtx.fillRect(0,0,tW,tH);
+
+  try {
+    // draw full video into offscreen destination (source = whole video)
+    offCtx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
+  } catch(e){
+    // fallback: stretch
+    offCtx.drawImage(video, 0, 0, tW, tH);
+  }
+
+  // store offscreen draw info for mapping (used by onResults to draw into visible canvas)
+  off._lastDrawInfo = { vw, vh, tW, tH, dx, dy, dw, dh };
 }
 
-/* ===== draw full video (contain) into canvas and store draw info ===== */
-function drawVideoToCanvasSquare(){
-  if(!video || !video.videoWidth || !video.videoHeight) return;
-  updateCanvasSquare();
-  const cssW = canvas.clientWidth;
-  const cssH = canvas.clientHeight;
-  if(cssW === 0 || cssH === 0) return;
-
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  const info = computeContain(vw, vh, cssW, cssH);
-  const dpr = window.devicePixelRatio || 1;
-  const destX = Math.round(info.dx * dpr);
-  const destY = Math.round(info.dy * dpr);
-  const destW = Math.round(info.dw * dpr);
-  const destH = Math.round(info.dh * dpr);
-
-  try{
-    ctx.drawImage(video, info.sx, info.sy, info.sw, info.sh, destX, destY, destW, destH);
-  }catch(e){
-    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
-  }
-  canvas._lastDrawInfo = { vw, vh, cssW, cssH, ...info };
-}
-
-/* ===== onResults: draw frame, draw landmarks, prediction logic ===== */
+/* ---------------- onResults: draw offscreen into visible canvas and render landmarks ---------------- */
 function onResults(results){
-  drawVideoToCanvasSquare();
+  // draw the offscreen (processed) image into the visible canvas using contain math to fit the square
+  drawOffscreenToVisible();
 
   const now = performance.now();
   if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
     lastHandSeenAt = now;
     const handsArr = results.multiHandLandmarks;
-    drawLandmarksMapped(handsArr);
-    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.clientWidth, y: lm.y * canvas.clientHeight})));
+    drawLandmarksFromOffscreen(handsArr); // landmarks are relative to offscreen coords
+    // prediction pipeline (unchanged)
+    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * off.width, y: lm.y * off.height})));
     const vec = twoHandsXYToVector(all_hands_px);
 
     let voted = null;
@@ -350,34 +337,68 @@ function onResults(results){
   }
 }
 
-/* ===== draw landmarks mapped using last draw info (contain-aware) ===== */
-function drawLandmarksMapped(handsArr){
+/* ---------------- draw offscreen canvas into visible canvas (contain) ---------------- */
+function drawOffscreenToVisible(){
+  updateCanvasSquare(); // ensures canvas size + transform correct
+  const info = off._lastDrawInfo || { tW: off.width, tH: off.height, dx:0, dy:0, dw:off.width, dh:off.height };
+  const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
+  // compute contain for offscreen -> visible CSS area
+  const videoAspect = info.tW / info.tH;
+  const targetAspect = cssW / cssH;
+  let dw, dh, dx, dy;
+  if(videoAspect > targetAspect){
+    dh = cssH;
+    dw = Math.round(dh * videoAspect);
+    dx = Math.round((cssW - dw)/2);
+    dy = 0;
+  } else {
+    dw = cssW;
+    dh = Math.round(dw / videoAspect);
+    dx = 0;
+    dy = Math.round((cssH - dh)/2);
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const destX = Math.round(dx * dpr);
+  const destY = Math.round(dy * dpr);
+  const destW = Math.round(dw * dpr);
+  const destH = Math.round(dh * dpr);
+
+  try {
+    // draw the offscreen (PROC_SIZE image) into visible canvas
+    ctx.drawImage(off, 0, 0, off.width, off.height, destX, destY, destW, destH);
+  } catch(e){
+    // fallback full-stretch
+    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+    ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
+  }
+
+  // save draw mapping for landmarks scaling (map offscreen coords -> visible device px)
+  canvas._lastDrawInfo = { offW: off.width, offH: off.height, destX, destY, destW, destH, cssW, cssH, dpr };
+}
+
+/* ---------------- draw landmarks returned by Mediapipe (offscreen-based coords) ---------------- */
+function drawLandmarksFromOffscreen(handsArr){
   const info = canvas._lastDrawInfo;
   if(!info) return;
-
   ctx.save();
   ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
 
-  const destX = info.dx;
-  const destY = info.dy;
-  const scaleX = info.dw / info.sw; // CSS scale
-  const scaleY = info.dh / info.sh;
-
-  const dpr = window.devicePixelRatio || 1;
-  const destXpx = destX * dpr;
-  const destYpx = destY * dpr;
-  const scaleXpx = scaleX * dpr;
-  const scaleYpx = scaleY * dpr;
+  const destXpx = info.destX;
+  const destYpx = info.destY;
+  const scaleXpx = info.destW / info.offW;
+  const scaleYpx = info.destH / info.offH;
 
   ctx.beginPath();
   for(const hand of handsArr){
     for(const c of connections){
       const a = hand[c[0]], b = hand[c[1]];
-      const ax = destXpx + (a.x * info.sw) * scaleXpx;
-      const ay = destYpx + (a.y * info.sh) * scaleYpx;
-      const bx = destXpx + (b.x * info.sw) * scaleXpx;
-      const by = destYpx + (b.y * info.sh) * scaleYpx;
+      const ax = destXpx + (a.x * info.offW) * scaleXpx;
+      const ay = destYpx + (a.y * info.offH) * scaleYpx;
+      const bx = destXpx + (b.x * info.offW) * scaleXpx;
+      const by = destYpx + (b.y * info.offH) * scaleYpx;
       ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
     }
   }
@@ -385,15 +406,15 @@ function drawLandmarksMapped(handsArr){
   for(const hand of handsArr){
     for(let i=0;i<hand.length;i++){
       const p = hand[i];
-      const px = destXpx + (p.x * info.sw) * scaleXpx;
-      const py = destYpx + (p.y * info.sh) * scaleYpx;
+      const px = destXpx + (p.x * info.offW) * scaleXpx;
+      const py = destYpx + (p.y * info.offH) * scaleYpx;
       ctx.beginPath(); ctx.arc(px, py, i===8?6:4,0,Math.PI*2); ctx.fill();
     }
   }
   ctx.restore();
 }
 
-/* ===== helper vectorization (unchanged) ===== */
+/* ---------------- vectorization (unchanged) ---------------- */
 function twoHandsXYToVector(all_hands_px){
   if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
   function singleVec(pxs){
@@ -407,10 +428,10 @@ function twoHandsXYToVector(all_hands_px){
   const concat = new Float32Array(84); concat.set(v1,0); concat.set(v2,42); return concat;
 }
 
-/* --- permission hint --- */
+/* ---------------- permission hint ---------------- */
 (async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') document.getElementById('perm').style.display='block'; }catch(e){} })();
 
-/* --- Chat helpers + STT --- */
+/* ---------------- chat + STT ---------------- */
 function addChatBubble(text, who='DEAF'){
   const el = document.createElement('div');
   el.className = 'bubble ' + (who === 'DEAF' ? 'deaf' : 'hear');
