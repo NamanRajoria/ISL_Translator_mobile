@@ -181,14 +181,14 @@ startBtn.onclick = async () => {
     await video.play();
 
     // Best-effort apply lower constraints (some browsers ignore)
-    try{
+    /*try{
       const [track] = stream.getVideoTracks();
       if(track && track.applyConstraints){
         await track.applyConstraints({ width: PROC_SIZE, height: PROC_SIZE, aspectRatio: 1.0 });
       }
       const settings = track.getSettings ? track.getSettings() : {};
       console.log('Camera settings:', settings);
-    }catch(e){ console.warn('applyConstraints failed', e); }
+    }catch(e){ console.warn('applyConstraints failed', e); } */
 
     video.addEventListener('loadedmetadata', () => { updateCanvasSquare(); }, { once: true });
 
@@ -471,4 +471,5 @@ clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
 </html>
+
 
