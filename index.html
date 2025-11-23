@@ -181,14 +181,14 @@ startBtn.onclick = async () => {
     await video.play();
 
     // Best-effort apply lower constraints (some browsers ignore)
-    /*try{
+    try{
       const [track] = stream.getVideoTracks();
       if(track && track.applyConstraints){
         await track.applyConstraints({ width: PROC_SIZE, height: PROC_SIZE, aspectRatio: 1.0 });
       }
       const settings = track.getSettings ? track.getSettings() : {};
       console.log('Camera settings:', settings);
-    }catch(e){ console.warn('applyConstraints failed', e); } */
+    }catch(e){ console.warn('applyConstraints failed', e); } 
 
     video.addEventListener('loadedmetadata', () => { updateCanvasSquare(); }, { once: true });
 
@@ -238,6 +238,7 @@ async function tick(ts){
 }
 
 /* ---------------- draw video into offscreen using contain (no crop) ---------------- */
+/* ---------------- draw video into offscreen using contain (Corrected) ---------------- */
 function drawVideoToOffscreenContain(){
   const vw = video.videoWidth || 1;
   const vh = video.videoHeight || 1;
@@ -248,18 +249,21 @@ function drawVideoToOffscreenContain(){
   const vA = vw / vh;
   const tA = tW / tH;
   let dw, dh, dx, dy;
+
   if(vA > tA){
-    // video wider: fit height
-    dh = tH;
-    dw = Math.round(dh * vA);
-    dx = Math.round((tW - dw) / 2);
-    dy = 0;
-  } else {
-    // video taller: fit width
+    // Video is WIDER than the box (e.g., Landscape on Square)
+    // CORRECT LOGIC: Fit the Width, shrink the Height
     dw = tW;
     dh = Math.round(dw / vA);
     dx = 0;
-    dy = Math.round((tH - dh) / 2);
+    dy = Math.round((tH - dh) / 2); // Center vertically (letterbox)
+  } else {
+    // Video is TALLER than the box (e.g., Portrait on Square)
+    // CORRECT LOGIC: Fit the Height, shrink the Width
+    dh = tH;
+    dw = Math.round(dh * vA);
+    dy = 0;
+    dx = Math.round((tW - dw) / 2); // Center horizontally (pillarbox)
   }
 
   // clear offscreen
@@ -272,7 +276,7 @@ function drawVideoToOffscreenContain(){
     // draw full video into offscreen destination (source = whole video)
     offCtx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
   } catch(e){
-    // fallback: stretch
+    // fallback
     offCtx.drawImage(video, 0, 0, tW, tH);
   }
 
@@ -471,5 +475,6 @@ clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
 </html>
+
 
 
