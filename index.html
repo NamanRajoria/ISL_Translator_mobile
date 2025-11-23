@@ -110,7 +110,7 @@ const INFER_FPS = 12;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MIRROR = true; // user-facing preview mirror (canvas flips horizontally)
+const MIRROR = true; // preview mirror for user (canvas flips horizontally)
 let rafId = null;
 
 /* --- DOM --- */
@@ -242,7 +242,7 @@ async function tick(ts){
   }
 }
 
-/* ===== New: contain math (draw whole video inside canvas) ===== */
+/* ===== compute contain (draw full video inside canvas, no crop) ===== */
 function computeContain(vw, vh, targetW, targetH){
   const videoAspect = vw / vh;
   const targetAspect = targetW / targetH;
@@ -288,12 +288,10 @@ function drawVideoToCanvasSquare(){
   try{
     ctx.drawImage(video, info.sx, info.sy, info.sw, info.sh, destX, destY, destW, destH);
   }catch(e){
-    // fallback draw (shouldn't normally happen)
     ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
   }
-  // Save info for landmark mapping
   canvas._lastDrawInfo = { vw, vh, cssW, cssH, ...info };
 }
 
@@ -361,13 +359,11 @@ function drawLandmarksMapped(handsArr){
   ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
 
-  // destination in CSS px
   const destX = info.dx;
   const destY = info.dy;
   const scaleX = info.dw / info.sw; // CSS scale
   const scaleY = info.dh / info.sh;
 
-  // convert to device pixels (ctx already scaled by dpr and flipped if mirror)
   const dpr = window.devicePixelRatio || 1;
   const destXpx = destX * dpr;
   const destYpx = destY * dpr;
