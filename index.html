@@ -105,18 +105,18 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
 <script>
-/* Square preview fixes:
- - square canvas (width-driven)
- - reduced crop to avoid over-zoom on iPhone
- - request lower, square camera resolution (ideal 640x640)
- - MIRROR toggle controls horizontal flip of overlay and video draw
+/* Square preview fixes & iPhone resolution handling
+ - Keep a mirrored preview for user (MIRROR=true)
+ - set Mediapipe selfieMode:false so landmarks are in camera coords (no double-mirror)
+ - request square 640x640 as ideal; attempt applyConstraints after start
+ - centralize transform handling so landmark drawing uses same coordinate space
 */
 const INFER_FPS = 12;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MAX_CROP_PERCENT = 0.12; // tighter cap to avoid over-zoom on iPhone
-const MIRROR = true; // set true to mirror horizontally
+const MAX_CROP_PERCENT = 0.12; // cap to avoid excessive crop on iPhone
+const MIRROR = true; // preview mirror for user-facing UX
 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
@@ -148,9 +148,9 @@ function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-/* mediapipe */
+/* mediapipe: IMPORTANT change selfieMode:false to avoid double-mirroring landmarks */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
 /* state */
@@ -163,17 +163,19 @@ let spaceInsertedAt = 0;
 let lastAppendTime = 0;
 let lastTick = 0;
 
-/* square sizing: width-driven */
+/* central transform & sizing */
 function updateCanvasSquare(){
   const container = document.getElementById('cameraWrap');
   if(!container) return;
   const dpr = window.devicePixelRatio || 1;
-  const cw = Math.min(container.clientWidth, 720); // cap width so canvas doesn't get huge
-  const desiredCssH = cw; // square
-  canvas.style.width = cw + 'px';
-  canvas.style.height = desiredCssH + 'px';
-  canvas.width = Math.round(cw * dpr);
-  canvas.height = Math.round(desiredCssH * dpr);
+  const cw = Math.min(container.clientWidth, 720); // cap width
+  const cssSize = cw;
+  canvas.style.width = cssSize + 'px';
+  canvas.style.height = cssSize + 'px';
+  canvas.width = Math.round(cssSize * dpr);
+  canvas.height = Math.round(cssSize * dpr);
+
+  // Reset transform: scale by dpr and optionally flip horizontally for mirror preview.
   ctx.setTransform(dpr * (MIRROR ? -1 : 1), 0, 0, dpr, MIRROR ? canvas.width : 0, 0);
 }
 window.addEventListener('resize', updateCanvasSquare);
@@ -183,15 +185,30 @@ updateCanvasSquare();
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
-    const constraints = { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 } }, audio: false };
+    const constraints = { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 }, frameRate: { ideal: 30 } }, audio: false };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    // attach
     video.srcObject = stream;
     await video.play();
+
+    // try to apply constraints to force smaller resolution (best-effort)
+    try{
+      const [track] = stream.getVideoTracks();
+      if(track && track.applyConstraints){
+        // attempt to force square-ish settings (some browsers ignore)
+        await track.applyConstraints({ width: 640, height: 640, aspectRatio: 1.0 });
+      }
+      const settings = track.getSettings ? track.getSettings() : {};
+      console.log('Camera settings:', settings);
+      // helpful debug: on iPhone Safari you'll see the real width/height chosen
+    }catch(e){ console.warn('applyConstraints failed', e); }
+
     video.addEventListener('loadedmetadata', () => { updateCanvasSquare(); }, { once: true });
     lastTick = performance.now();
     requestAnimationFrame(tick);
   }catch(e){
     perm.style.display='block';
+    console.error('Camera error', e);
     alert('Camera error: '+ (e.message || e.name));
   }
 };
@@ -216,7 +233,7 @@ async function tick(ts){
   if(video.readyState >= 2) await hands.send({image: video});
 }
 
-/* compute limited crop */
+/* compute limited crop (cover-like) but capped */
 function computeCoverCrop(vw, vh, targetW, targetH){
   const videoAspect = vw / vh;
   const targetAspect = targetW / targetH;
@@ -254,18 +271,16 @@ function drawVideoToCanvasSquare(){
   const vh = video.videoHeight;
   const crop = computeCoverCrop(vw, vh, cssW, cssH);
   const sx = crop.sx, sy = crop.sy, sw = crop.sw, sh = crop.sh;
+
+  // drawImage maps source crop to full canvas area (canvas is already scaled by dpr in transform)
   try{
-    // if MIRROR true, ctx transform already set in updateCanvasSquare
-    if(MIRROR){
-      // draw mirrored: when ctx is flipped, drawImage needs negative width or translate handled above
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-    } else {
-      ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-    }
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   }catch(e){
+    // fallback to direct draw if something unexpected occurs
     ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // restore transform for subsequent draws
+    ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
   }
 }
 
@@ -324,7 +339,9 @@ function onResults(results){
   }
 }
 
-/* draw landmarks mapped to crop */
+/* draw landmarks mapped to crop. NOTE: because canvas transform already flips if MIRROR=true,
+   we compute positions in canvas coordinate space and draw directly — no extra flip needed.
+*/
 function drawLandmarksMapped(handsArr){
   ctx.save();
   ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
@@ -411,11 +428,9 @@ micBtn.addEventListener('click', ()=>{
   if(!listening){ recognition.start(); listening=true; micBtn.style.opacity=0.8; micBtn.innerText='●'; }
   else { recognition.stop(); listening=false; micBtn.style.opacity=1; micBtn.innerText='🎤'; }
 });
-localSend.addEventListener('click', ()=>{
-  const t = transcript.value.trim(); if(!t) return; addChatBubble(t, 'HEARING'); try{ const u = new SpeechSynthesisUtterance(t); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){} transcript.value=''; });
+localSend.addEventListener('click', ()=>{ const t = transcript.value.trim(); if(!t) return; addChatBubble(t, 'HEARING'); try{ const u = new SpeechSynthesisUtterance(t); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){} transcript.value=''; });
 clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 
 </script>
 </body>
 </html>
-
