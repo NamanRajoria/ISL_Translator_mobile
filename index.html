@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Simple Stretch</title>
+<title>ISL Translator — Fixed Mirror</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -98,7 +98,7 @@
 
 <script>
 /* ---------------- CONFIG ---------------- */
-const INFER_FPS = 15; // Slightly faster since no offscreen drawing
+const INFER_FPS = 15;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
@@ -138,7 +138,9 @@ function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; retu
 
 /* ---------------- Mediapipe ---------------- */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:true, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+
+// FIX IS HERE: selfieMode MUST be false, because we are already mirroring the canvas manually.
+hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
 /* ---------------- State Vars ---------------- */
@@ -155,23 +157,12 @@ let lastTick = 0;
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
-    // REVERTED TO OLD LOGIC: No specific width/height.
-    // This allows iPhone to pick the native sensor ratio (no zoom).
-    const constraints = { 
-        video: { facingMode: 'user' }, 
-        audio: false 
-    };
-    
+    const constraints = { video: { facingMode: 'user' }, audio: false };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
     await video.play();
 
-    // Sizing: Match canvas internal res to CSS display size
-    // We just want it to fill the square box, stretching if needed.
-    const container = document.getElementById('cameraWrap');
-    const dpr = window.devicePixelRatio || 1;
-    // We force a square or rectangle based on the container, but usually square in this UI
-    // Let's just fix it to 640 for internal processing to keep it simple
+    // Set internal resolution
     canvas.width = 640;
     canvas.height = 640; 
 
@@ -208,42 +199,38 @@ async function tick(ts){
   const dt = ts - lastTick;
   if(dt < (1000/INFER_FPS)) return;
   lastTick = ts;
-
   if(video.readyState >= 2){
-    // DIRECT FEED: Old way. No offscreen canvas.
     await hands.send({ image: video });
   }
 }
 
-/* ---------------- Draw & Predict (OLD WAY) ---------------- */
+/* ---------------- Draw & Predict ---------------- */
 function onResults(results){
-  // 1. CLEAR & SETUP
   const w = canvas.width;
   const h = canvas.height;
   
   ctx.save();
   ctx.clearRect(0, 0, w, h);
   
-  // 2. MIRROR & STRETCH
-  // This matches your old code logic: scale -1,1
+  // MANUAL MIRROR: This flips the drawing context.
   ctx.translate(w, 0);
   ctx.scale(-1, 1);
   
-  // 3. DRAW VIDEO DIRECTLY (STRETCH TO FIT)
+  // Draw Video (now it looks mirrored)
   if(video.readyState >= 2){
     ctx.drawImage(video, 0, 0, w, h);
   }
 
-  // 4. DRAW LANDMARKS
   const now = performance.now();
   if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
     lastHandSeenAt = now;
     const handsArr = results.multiHandLandmarks;
 
+    // Draw landmarks (since selfieMode is false, the coordinates match the raw video)
+    // The context flip above will flip them to match the mirrored video.
     drawLandmarksSimple(handsArr, w, h);
 
-    // 5. PREDICTION
-    // Convert landmarks (0-1) to pixels (0-w, 0-h)
+    // Predict
     const all_hands_px = handsArr.map(hand => hand.map(lm => ({ x: lm.x * w, y: lm.y * h })));
     const vec = twoHandsXYToVector(all_hands_px);
 
@@ -293,7 +280,6 @@ function onResults(results){
   ctx.restore();
 }
 
-/* ---------------- Simple Drawing Util ---------------- */
 function drawLandmarksSimple(handsArr, w, h){
   ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
@@ -301,8 +287,6 @@ function drawLandmarksSimple(handsArr, w, h){
   for(const hand of handsArr){
     for(const c of connections){
       const a = hand[c[0]], b = hand[c[1]];
-      // Note: Landmarks are already normalized 0-1, so we just multiply by w/h
-      // Because we are inside the transformed context (mirror), we just draw normally.
       ctx.beginPath();
       ctx.moveTo(a.x * w, a.y * h);
       ctx.lineTo(b.x * w, b.y * h);
