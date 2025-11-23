@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Fixed Mirror</title>
+<title>ISL Translator</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -12,8 +12,8 @@
     --panel-bg: #f5efeb;
     --text: #ffffff;
     --muted: rgba(255,255,255,0.75);
-    --bubble-deaf-bg: #567c8d;
-    --bubble-hear-bg: rgba(255,255,255,0.06);
+    --bubble-isl-bg: #567c8d;
+    --bubble-eng-bg: rgba(255,255,255,0.06);
   }
   html,body{height:100%;margin:0;background:var(--app-bg);color:var(--text);font-family:Inter,system-ui,Arial;}
   .app{max-width:920px;margin:12px auto;padding:12px;box-sizing:border-box;}
@@ -22,7 +22,7 @@
 
   .camera-wrap{ background: #000; border-radius:12px; overflow:hidden; position:relative; border: 2px solid rgba(255,255,255,0.04); display:flex;flex-direction:column; min-height:0; align-items:center; }
   
-  /* Canvas fills the container */
+  /* Canvas stretches to fill */
   #canvas{width:100%;height:100%;display:block;background:#000; object-fit: fill;}
   
   .controls-top{position:absolute;left:12px;top:12px;display:flex;gap:8px;z-index:40}
@@ -33,8 +33,12 @@
   
   .buffer-row{display:flex;gap:8px;align-items:center;justify-content:center}
   .buffer{flex:1;padding:12px;border-radius:10px;background:rgba(255,255,255,0.06);color:var(--text);font-weight:700;min-height:48px;text-align:center}
-  .send-btn{width:56px;height:48px;border-radius:10px;border:0;background:var(--panel-bg);color:#042026;font-weight:800;font-size:20px;cursor:pointer}
   
+  /* Buttons */
+  .send-btn{width:56px;height:48px;border-radius:10px;border:0;background:var(--panel-bg);color:#042026;font-weight:800;font-size:20px;cursor:pointer}
+  .del-btn{width:56px;height:48px;border-radius:10px;border:0;background:rgba(255,50,50,0.2);color:var(--text);font-weight:600;font-size:20px;cursor:pointer}
+  .del-btn:active{background:rgba(255,50,50,0.4);}
+
   .chat-panel{background:transparent;border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:12px}
   .chat-window{background:rgba(0,0,0,0.06);padding:12px;border-radius:10px;max-height:58vh;overflow:auto}
   .chat-controls{display:flex;gap:8px;align-items:center;margin-top:8px}
@@ -44,8 +48,8 @@
   .clear-chat{padding:8px 10px;border-radius:8px;border:0;background:rgba(255,255,255,0.04);color:var(--text);cursor:pointer;margin-left:auto}
   
   .bubble{padding:10px;border-radius:10px;margin-bottom:8px;word-break:break-word;max-width:85%}
-  .bubble.deaf{background:var(--bubble-deaf-bg);color:#042026;align-self:flex-start}
-  .bubble.hear{background:var(--bubble-hear-bg);color:var(--text);align-self:flex-end}
+  .bubble.isl{background:var(--bubble-isl-bg);color:#042026;align-self:flex-start}
+  .bubble.eng{background:var(--bubble-eng-bg);color:var(--text);align-self:flex-end}
   .small{font-size:13px;color:var(--muted)}
   .perm{padding:10px;border-radius:8px;background:rgba(0,0,0,0.4);color:var(--panel-bg);margin:8px;display:none}
   
@@ -60,7 +64,7 @@
         <div class="controls-top">
           <button class="ctrl-btn" id="start">Start</button>
           <button class="ctrl-btn" id="stop">Stop</button>
-          <button class="ctrl-btn" id="clearBufferBtn">Clear</button>
+          <button class="ctrl-btn" id="clearBufferBtn">Clear All</button>
         </div>
 
         <video id="video" autoplay playsinline muted style="display:none"></video>
@@ -72,6 +76,7 @@
           </div>
           <div class="buffer-row">
             <div id="buffer" class="buffer" aria-live="polite">—</div>
+            <button id="backspaceBtn" class="del-btn" title="Backspace">⌫</button>
             <button id="sendBtn" class="send-btn" title="Send">→</button>
           </div>
         </div>
@@ -111,6 +116,7 @@ const ctx = canvas.getContext('2d');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const clearBufferBtn = document.getElementById('clearBufferBtn');
+const backspaceBtn = document.getElementById('backspaceBtn');
 const labelEl = document.getElementById('label');
 const bufferEl = document.getElementById('buffer');
 const perm = document.getElementById('perm');
@@ -139,7 +145,8 @@ function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; retu
 /* ---------------- Mediapipe ---------------- */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 
-// FIX IS HERE: selfieMode MUST be false, because we are already mirroring the canvas manually.
+// NOTE: selfieMode is FALSE. We manually mirror the canvas. 
+// This ensures landmarks line up correctly with the mirrored video.
 hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
@@ -157,12 +164,14 @@ let lastTick = 0;
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
+    // NO specific resolution constraints. 
+    // This allows iPhone to use full sensor (no zoom).
     const constraints = { video: { facingMode: 'user' }, audio: false };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject = stream;
     await video.play();
 
-    // Set internal resolution
+    // Internal resolution for drawing (canvas stretches to fit screen)
     canvas.width = 640;
     canvas.height = 640; 
 
@@ -185,10 +194,19 @@ stopBtn.onclick = ()=> {
 
 /* ---------------- Controls ---------------- */
 clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
+
+// NEW: Backspace Button Logic
+backspaceBtn.onclick = () => {
+  if(wordBuffer.length > 0){
+    wordBuffer = wordBuffer.slice(0, -1);
+    bufferEl.innerText = wordBuffer || '—';
+  }
+};
+
 sendBtn.onclick = ()=> {
   const text = wordBuffer.trim();
   if(!text) return;
-  addChatBubble(text, 'DEAF');
+  addChatBubble(text, 'ISL');
   try{ const u = new SpeechSynthesisUtterance(text); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){}
   wordBuffer=''; bufferEl.innerText='—';
 };
@@ -212,11 +230,11 @@ function onResults(results){
   ctx.save();
   ctx.clearRect(0, 0, w, h);
   
-  // MANUAL MIRROR: This flips the drawing context.
+  // MANUAL MIRROR: Flip horizontally
   ctx.translate(w, 0);
   ctx.scale(-1, 1);
   
-  // Draw Video (now it looks mirrored)
+  // Draw Video (Mirrored)
   if(video.readyState >= 2){
     ctx.drawImage(video, 0, 0, w, h);
   }
@@ -226,8 +244,7 @@ function onResults(results){
     lastHandSeenAt = now;
     const handsArr = results.multiHandLandmarks;
 
-    // Draw landmarks (since selfieMode is false, the coordinates match the raw video)
-    // The context flip above will flip them to match the mirrored video.
+    // Draw landmarks (coordinates are raw, so they get flipped by ctx)
     drawLandmarksSimple(handsArr, w, h);
 
     // Predict
@@ -319,13 +336,19 @@ function twoHandsXYToVector(all_hands_px){
 (async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') document.getElementById('perm').style.display='block'; }catch(e){} })();
 
 /* ---------------- Chat + STT ---------------- */
-function addChatBubble(text, who='DEAF'){
+// MODIFIED: Labels changed to ISL / English
+function addChatBubble(text, who='ISL'){
   const el = document.createElement('div');
-  el.className = 'bubble ' + (who === 'DEAF' ? 'deaf' : 'hear');
-  el.innerHTML = (who === 'DEAF' ? '<strong>DEAF →</strong> ' : '<strong>HEARING →</strong> ') + escapeHtml(text);
+  el.className = 'bubble ' + (who === 'ISL' ? 'isl' : 'eng');
+  
+  // LABELS UPDATED HERE
+  const label = who === 'ISL' ? 'ISL' : 'English';
+  el.innerHTML = `<strong>${label} →</strong> ${escapeHtml(text)}`;
+  
   chatWindow.appendChild(el);
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
+
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (m)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 let recognition = null;
@@ -352,7 +375,16 @@ micBtn.addEventListener('click', ()=>{
   if(!listening){ recognition.start(); listening=true; micBtn.style.opacity=0.8; micBtn.innerText='●'; }
   else { recognition.stop(); listening=false; micBtn.style.opacity=1; micBtn.innerText='🎤'; }
 });
-localSend.addEventListener('click', ()=>{ const t = transcript.value.trim(); if(!t) return; addChatBubble(t, 'HEARING'); try{ const u = new SpeechSynthesisUtterance(t); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){} transcript.value=''; });
+
+// Update Local Send to use 'English' label
+localSend.addEventListener('click', ()=>{ 
+  const t = transcript.value.trim(); 
+  if(!t) return; 
+  addChatBubble(t, 'English'); 
+  try{ const u = new SpeechSynthesisUtterance(t); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }catch(e){} 
+  transcript.value=''; 
+});
+
 clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
