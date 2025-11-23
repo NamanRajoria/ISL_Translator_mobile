@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>ISL Translator — Mobile (Square Preview)</title>
+<title>ISL Translator — Mobile (Square Preview) — Contain Mode</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -70,7 +70,7 @@
 
         <video id="video" autoplay playsinline muted style="display:none"></video>
         <!-- square canvas preview -->
-        <canvas id="canvas" width="1640" height="1640" aria-label="Camera preview"></canvas>
+        <canvas id="canvas" width="640" height="640" aria-label="Camera preview"></canvas>
 
         <div class="hud-bottom">
           <div style="display:flex;align-items:center;justify-content:center;">
@@ -105,19 +105,15 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
 <script>
-/* Square preview fixes & iPhone resolution handling
- - Keep a mirrored preview for user (MIRROR=true)
- - set Mediapipe selfieMode:false so landmarks are in camera coords (no double-mirror)
- - request square 640x640 as ideal; attempt applyConstraints after start
- - centralize transform handling so landmark drawing uses same coordinate space
-*/
+/* --- Config --- */
 const INFER_FPS = 12;
 const LETTER_HOLD_MS = 2000;
 const NO_HAND_MS = 2000;
 const SMOOTH_WINDOW = 4;
-const MAX_CROP_PERCENT = 0.12; // cap to avoid excessive crop on iPhone
-const MIRROR = true; // preview mirror for user-facing UX
+const MIRROR = true; // user-facing preview mirror (canvas flips horizontally)
+let rafId = null;
 
+/* --- DOM --- */
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -135,6 +131,7 @@ const transcript = document.getElementById('transcript');
 const localSend = document.getElementById('localSend');
 const clearChat = document.getElementById('clearChat');
 
+/* --- Model loader (unchanged) --- */
 let weights=null, classes=null;
 (async function loadW(){
   const MODEL_FILES = ['weights.json','model-weights.json','model_weights.json'];
@@ -148,12 +145,12 @@ function relu(x){ for(let i=0;i<x.length;i++) if(x[i]<0) x[i]=0; return x;}
 function softmax(x){ let max=-Infinity; for(let i=0;i<x.length;i++) if(x[i]>max) max=x[i]; let s=0; const out=new Float32Array(x.length); for(let i=0;i<x.length;i++){ out[i]=Math.exp(x[i]-max); s+=out[i]; } for(let i=0;i<x.length;i++) out[i]/=s; return out;}
 function argmax(a){ let b=0; for(let i=1;i<a.length;i++) if(a[i]>a[b]) b=i; return b; }
 
-/* mediapipe: IMPORTANT change selfieMode:false to avoid double-mirroring landmarks */
+/* --- Mediapipe: selfieMode:false so landmarks use camera coords (avoid double mirror) --- */
 const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
 hands.setOptions({ maxNumHands:2, modelComplexity:1, selfieMode:false, minDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 hands.onResults(onResults);
 
-/* state */
+/* --- state --- */
 let recentPreds = [];
 let wordBuffer = '';
 let candidateLabel = null;
@@ -163,59 +160,69 @@ let spaceInsertedAt = 0;
 let lastAppendTime = 0;
 let lastTick = 0;
 
-/* central transform & sizing */
+/* --- sizing & transform centralization --- */
 function updateCanvasSquare(){
   const container = document.getElementById('cameraWrap');
   if(!container) return;
   const dpr = window.devicePixelRatio || 1;
-  const cw = Math.min(container.clientWidth, 720); // cap width
+  const cw = Math.min(container.clientWidth, 720); // cap width so canvas isn't huge
   const cssSize = cw;
   canvas.style.width = cssSize + 'px';
   canvas.style.height = cssSize + 'px';
   canvas.width = Math.round(cssSize * dpr);
   canvas.height = Math.round(cssSize * dpr);
 
-  // Reset transform: scale by dpr and optionally flip horizontally for mirror preview.
+  // central transform: scale for dpr and optionally flip horizontally for mirror
   ctx.setTransform(dpr * (MIRROR ? -1 : 1), 0, 0, dpr, MIRROR ? canvas.width : 0, 0);
 }
 window.addEventListener('resize', updateCanvasSquare);
 updateCanvasSquare();
 
-/* start camera with ideal square resolution to reduce auto-zoom */
+/* --- Start / Stop camera --- */
 startBtn.onclick = async () => {
   perm.style.display='none';
   try{
     const constraints = { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 640 }, frameRate: { ideal: 30 } }, audio: false };
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    // attach
     video.srcObject = stream;
     await video.play();
 
-    // try to apply constraints to force smaller resolution (best-effort)
+    // best-effort attempt to apply constraints (some browsers ignore)
     try{
       const [track] = stream.getVideoTracks();
       if(track && track.applyConstraints){
-        // attempt to force square-ish settings (some browsers ignore)
         await track.applyConstraints({ width: 640, height: 640, aspectRatio: 1.0 });
       }
       const settings = track.getSettings ? track.getSettings() : {};
       console.log('Camera settings:', settings);
-      // helpful debug: on iPhone Safari you'll see the real width/height chosen
     }catch(e){ console.warn('applyConstraints failed', e); }
 
     video.addEventListener('loadedmetadata', () => { updateCanvasSquare(); }, { once: true });
+
     lastTick = performance.now();
-    requestAnimationFrame(tick);
+    if(!rafId) rafId = requestAnimationFrame(tick);
   }catch(e){
     perm.style.display='block';
     console.error('Camera error', e);
     alert('Camera error: '+ (e.message || e.name));
   }
 };
-stopBtn.onclick = ()=>{ if(video.srcObject){ video.srcObject.getTracks().forEach(t=>t.stop()); video.srcObject=null; } };
-clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
 
-/* send */
+stopBtn.onclick = ()=> {
+  if(video.srcObject){
+    try{
+      video.srcObject.getTracks().forEach(t=>t.stop());
+    }catch(e){}
+    video.srcObject = null;
+  }
+  if(rafId){
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+};
+
+/* --- Controls --- */
+clearBufferBtn.onclick = ()=>{ wordBuffer=''; bufferEl.innerText='—'; };
 sendBtn.onclick = ()=> {
   const text = wordBuffer.trim();
   if(!text) return;
@@ -224,45 +231,44 @@ sendBtn.onclick = ()=> {
   wordBuffer=''; bufferEl.innerText='—';
 };
 
-/* main loop */
+/* --- Main loop --- */
 async function tick(ts){
-  requestAnimationFrame(tick);
+  rafId = requestAnimationFrame(tick);
   const dt = ts - lastTick;
   if(dt < (1000/INFER_FPS)) return;
   lastTick = ts;
-  if(video.readyState >= 2) await hands.send({image: video});
+  if(video.readyState >= 2) {
+    await hands.send({image: video});
+  }
 }
 
+/* ===== New: contain math (draw whole video inside canvas) ===== */
 function computeContain(vw, vh, targetW, targetH){
-  // returns how the full video (no crop) should be drawn into target area
-  // gives source coords (full video) and destination coords (centered on canvas)
-  // We'll draw the whole source [0,0,vw,vh] into [dx,dy,dw,dh] on canvas.
   const videoAspect = vw / vh;
   const targetAspect = targetW / targetH;
   let dw, dh, dx, dy;
   if(videoAspect > targetAspect){
-    // video is wider: full height fits, width will be reduced
+    // video is wider: fit height
     dh = targetH;
     dw = Math.round(dh * videoAspect);
     dx = Math.round((targetW - dw) / 2);
     dy = 0;
   } else {
-    // video is taller or equal: full width fits
+    // video is taller or equal: fit width
     dw = targetW;
     dh = Math.round(dw / videoAspect);
     dx = 0;
     dy = Math.round((targetH - dh) / 2);
   }
   return {
-    sx: 0, sy: 0, sw: vw, sh: vh,   // full source
-    dx, dy, dw, dh,                // destination area on canvas (CSS px)
-    // also return fractional scale factors if needed
+    sx: 0, sy: 0, sw: vw, sh: vh,
+    dx, dy, dw, dh,
     scaleX: dw / vw,
     scaleY: dh / vh
   };
 }
 
-/* ===== replace drawVideoToCanvasSquare with contain-draw version ===== */
+/* ===== draw full video (contain) into canvas and store draw info ===== */
 function drawVideoToCanvasSquare(){
   if(!video || !video.videoWidth || !video.videoHeight) return;
   updateCanvasSquare();
@@ -272,10 +278,7 @@ function drawVideoToCanvasSquare(){
 
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-
-  // compute how to draw full video into canvas (contain)
   const info = computeContain(vw, vh, cssW, cssH);
-  // destination in CSS pixels -> convert to canvas device pixels (canvas.width/height are dpr-scaled)
   const dpr = window.devicePixelRatio || 1;
   const destX = Math.round(info.dx * dpr);
   const destY = Math.round(info.dy * dpr);
@@ -283,36 +286,88 @@ function drawVideoToCanvasSquare(){
   const destH = Math.round(info.dh * dpr);
 
   try{
-    // Because ctx transform already set (dpr and optional mirror), drawImage maps source -> dest device pixels
     ctx.drawImage(video, info.sx, info.sy, info.sw, info.sh, destX, destY, destW, destH);
   }catch(e){
-    // fallback if transform issues happen: reset transform and draw
+    // fallback draw (shouldn't normally happen)
     ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
   }
-
-  // store last-draw info for landmark mapping (attach to canvas so draw & mapping use same values)
+  // Save info for landmark mapping
   canvas._lastDrawInfo = { vw, vh, cssW, cssH, ...info };
 }
 
-/* ===== replace drawLandmarksMapped with contain-aware mapping ===== */
+/* ===== onResults: draw frame, draw landmarks, prediction logic ===== */
+function onResults(results){
+  drawVideoToCanvasSquare();
+
+  const now = performance.now();
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
+    lastHandSeenAt = now;
+    const handsArr = results.multiHandLandmarks;
+    drawLandmarksMapped(handsArr);
+    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.clientWidth, y: lm.y * canvas.clientHeight})));
+    const vec = twoHandsXYToVector(all_hands_px);
+
+    let voted = null;
+    if(weights){
+      try{
+        let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
+        let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
+        let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
+        const probs = softmax(out2); const idx = argmax(probs);
+        voted = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
+        recentPreds.push(voted); if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
+        const counts = {}; for(const v of recentPreds) counts[v] = (counts[v]||0)+1;
+        let mv = recentPreds[recentPreds.length-1]; let maxc=0;
+        for(const k in counts) if(counts[k] > maxc){ maxc = counts[k]; mv = k; }
+        voted = mv;
+      }catch(e){ voted = null; }
+    } else { voted = null; }
+
+    labelEl.innerText = voted || '—';
+
+    if(voted){
+      if(candidateLabel !== voted){
+        candidateLabel = voted;
+        candidateStart = now;
+      } else {
+        if(now - candidateStart >= LETTER_HOLD_MS){
+          if(now - lastAppendTime > 300){
+            wordBuffer += candidateLabel;
+            bufferEl.innerText = wordBuffer;
+            lastAppendTime = now;
+          }
+          candidateLabel = null; candidateStart = 0;
+        }
+      }
+    } else { candidateLabel = null; candidateStart = 0; }
+
+  } else {
+    labelEl.innerText = '—';
+    if(now - lastHandSeenAt >= NO_HAND_MS && wordBuffer && (now - spaceInsertedAt > NO_HAND_MS)){
+      if(wordBuffer.slice(-1) !== ' '){ wordBuffer += ' '; bufferEl.innerText = wordBuffer; spaceInsertedAt = now; }
+    }
+    candidateLabel = null; candidateStart = 0;
+  }
+}
+
+/* ===== draw landmarks mapped using last draw info (contain-aware) ===== */
 function drawLandmarksMapped(handsArr){
-  // Use the same info computed in drawVideoToCanvasSquare so positions match exactly
   const info = canvas._lastDrawInfo;
-  if(!info){ return; }
+  if(!info) return;
 
   ctx.save();
   ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
 
-  // info.sx..sh are full video; info.dx,dy,dw,dh are destination area in CSS pixels
+  // destination in CSS px
   const destX = info.dx;
   const destY = info.dy;
   const scaleX = info.dw / info.sw; // CSS scale
   const scaleY = info.dh / info.sh;
 
-  // Convert to canvas device pixels (ctx already uses dpr*mirror transform)
+  // convert to device pixels (ctx already scaled by dpr and flipped if mirror)
   const dpr = window.devicePixelRatio || 1;
   const destXpx = destX * dpr;
   const destYpx = destY * dpr;
@@ -342,7 +397,7 @@ function drawLandmarksMapped(handsArr){
   ctx.restore();
 }
 
-/* vectorization */
+/* ===== helper vectorization (unchanged) ===== */
 function twoHandsXYToVector(all_hands_px){
   if(all_hands_px.length >= 2) all_hands_px = all_hands_px.sort((a,b)=>a[0].x - b[0].x);
   function singleVec(pxs){
@@ -356,10 +411,10 @@ function twoHandsXYToVector(all_hands_px){
   const concat = new Float32Array(84); concat.set(v1,0); concat.set(v2,42); return concat;
 }
 
-/* permission hint */
+/* --- permission hint --- */
 (async function checkPerm(){ if(!navigator.permissions) return; try{ const s = await navigator.permissions.query({name:'camera'}).catch(()=>null); if(s && s.state === 'denied') document.getElementById('perm').style.display='block'; }catch(e){} })();
 
-/* CHAT helpers */
+/* --- Chat helpers + STT --- */
 function addChatBubble(text, who='DEAF'){
   const el = document.createElement('div');
   el.className = 'bubble ' + (who === 'DEAF' ? 'deaf' : 'hear');
@@ -369,7 +424,6 @@ function addChatBubble(text, who='DEAF'){
 }
 function escapeHtml(s){ return String(s).replace(/[&<>"']/g, (m)=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-/* STT and controls */
 let recognition = null;
 let listening = false;
 if('webkitSpeechRecognition' in window || 'SpeechRecognition' in window){
@@ -400,5 +454,3 @@ clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
 </html>
-
-
