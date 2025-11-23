@@ -233,134 +233,100 @@ async function tick(ts){
   if(video.readyState >= 2) await hands.send({image: video});
 }
 
-/* compute limited crop (cover-like) but capped */
-function computeCoverCrop(vw, vh, targetW, targetH){
+function computeContain(vw, vh, targetW, targetH){
+  // returns how the full video (no crop) should be drawn into target area
+  // gives source coords (full video) and destination coords (centered on canvas)
+  // We'll draw the whole source [0,0,vw,vh] into [dx,dy,dw,dh] on canvas.
   const videoAspect = vw / vh;
   const targetAspect = targetW / targetH;
-  let sx=0, sy=0, sw=vw, sh=vh;
+  let dw, dh, dx, dy;
   if(videoAspect > targetAspect){
-    sw = Math.round(vh * targetAspect);
-    sx = Math.round((vw - sw)/2);
-    const cropPercent = (vw - sw) / vw;
-    if(cropPercent > MAX_CROP_PERCENT){
-      const allowedCrop = Math.round(vw * MAX_CROP_PERCENT);
-      sw = vw - allowedCrop;
-      sx = Math.round((vw - sw)/2);
-    }
+    // video is wider: full height fits, width will be reduced
+    dh = targetH;
+    dw = Math.round(dh * videoAspect);
+    dx = Math.round((targetW - dw) / 2);
+    dy = 0;
   } else {
-    sh = Math.round(vw / targetAspect);
-    sy = Math.round((vh - sh)/2);
-    const cropPercent = (vh - sh) / vh;
-    if(cropPercent > MAX_CROP_PERCENT){
-      const allowedCrop = Math.round(vh * MAX_CROP_PERCENT);
-      sh = vh - allowedCrop;
-      sy = Math.round((vh - sh)/2);
-    }
+    // video is taller or equal: full width fits
+    dw = targetW;
+    dh = Math.round(dw / videoAspect);
+    dx = 0;
+    dy = Math.round((targetH - dh) / 2);
   }
-  return { sx, sy, sw, sh };
+  return {
+    sx: 0, sy: 0, sw: vw, sh: vh,   // full source
+    dx, dy, dw, dh,                // destination area on canvas (CSS px)
+    // also return fractional scale factors if needed
+    scaleX: dw / vw,
+    scaleY: dh / vh
+  };
 }
 
-/* draw video into square canvas */
+/* ===== replace drawVideoToCanvasSquare with contain-draw version ===== */
 function drawVideoToCanvasSquare(){
   if(!video || !video.videoWidth || !video.videoHeight) return;
   updateCanvasSquare();
   const cssW = canvas.clientWidth;
   const cssH = canvas.clientHeight;
   if(cssW === 0 || cssH === 0) return;
+
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  const crop = computeCoverCrop(vw, vh, cssW, cssH);
-  const sx = crop.sx, sy = crop.sy, sw = crop.sw, sh = crop.sh;
 
-  // drawImage maps source crop to full canvas area (canvas is already scaled by dpr in transform)
+  // compute how to draw full video into canvas (contain)
+  const info = computeContain(vw, vh, cssW, cssH);
+  // destination in CSS pixels -> convert to canvas device pixels (canvas.width/height are dpr-scaled)
+  const dpr = window.devicePixelRatio || 1;
+  const destX = Math.round(info.dx * dpr);
+  const destY = Math.round(info.dy * dpr);
+  const destW = Math.round(info.dw * dpr);
+  const destH = Math.round(info.dh * dpr);
+
   try{
-    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    // Because ctx transform already set (dpr and optional mirror), drawImage maps source -> dest device pixels
+    ctx.drawImage(video, info.sx, info.sy, info.sw, info.sh, destX, destY, destW, destH);
   }catch(e){
-    // fallback to direct draw if something unexpected occurs
+    // fallback if transform issues happen: reset transform and draw
     ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    // restore transform for subsequent draws
     ctx.setTransform((window.devicePixelRatio || 1) * (MIRROR ? -1 : 1), 0, 0, window.devicePixelRatio || 1, MIRROR ? canvas.width : 0, 0);
   }
+
+  // store last-draw info for landmark mapping (attach to canvas so draw & mapping use same values)
+  canvas._lastDrawInfo = { vw, vh, cssW, cssH, ...info };
 }
 
-/* onResults: draw frame, landmarks, prediction logic */
-function onResults(results){
-  drawVideoToCanvasSquare();
-
-  const now = performance.now();
-  if(results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
-    lastHandSeenAt = now;
-    const handsArr = results.multiHandLandmarks;
-    drawLandmarksMapped(handsArr);
-    const all_hands_px = handsArr.map(h => h.map(lm => ({x: lm.x * canvas.clientWidth, y: lm.y * canvas.clientHeight})));
-    const vec = twoHandsXYToVector(all_hands_px);
-
-    let voted = null;
-    if(weights){
-      try{
-        let out0 = denseForward(vec, weights.layers[0].kernel, weights.layers[0].bias); out0 = relu(out0);
-        let out1 = denseForward(out0, weights.layers[1].kernel, weights.layers[1].bias); out1 = relu(out1);
-        let out2 = denseForward(out1, weights.layers[2].kernel, weights.layers[2].bias);
-        const probs = softmax(out2); const idx = argmax(probs);
-        voted = (weights.classes && weights.classes[idx]) ? weights.classes[idx] : String(idx);
-        recentPreds.push(voted); if(recentPreds.length > SMOOTH_WINDOW) recentPreds.shift();
-        const counts = {}; for(const v of recentPreds) counts[v] = (counts[v]||0)+1;
-        let mv = recentPreds[recentPreds.length-1]; let maxc=0;
-        for(const k in counts) if(counts[k] > maxc){ maxc = counts[k]; mv = k; }
-        voted = mv;
-      }catch(e){ voted = null; }
-    } else { voted = null; }
-
-    labelEl.innerText = voted || '—';
-
-    if(voted){
-      if(candidateLabel !== voted){
-        candidateLabel = voted;
-        candidateStart = now;
-      } else {
-        if(now - candidateStart >= LETTER_HOLD_MS){
-          if(now - lastAppendTime > 300){
-            wordBuffer += candidateLabel;
-            bufferEl.innerText = wordBuffer;
-            lastAppendTime = now;
-          }
-          candidateLabel = null; candidateStart = 0;
-        }
-      }
-    } else { candidateLabel = null; candidateStart = 0; }
-
-  } else {
-    labelEl.innerText = '—';
-    if(now - lastHandSeenAt >= NO_HAND_MS && wordBuffer && (now - spaceInsertedAt > NO_HAND_MS)){
-      if(wordBuffer.slice(-1) !== ' '){ wordBuffer += ' '; bufferEl.innerText = wordBuffer; spaceInsertedAt = now; }
-    }
-    candidateLabel = null; candidateStart = 0;
-  }
-}
-
-/* draw landmarks mapped to crop. NOTE: because canvas transform already flips if MIRROR=true,
-   we compute positions in canvas coordinate space and draw directly — no extra flip needed.
-*/
+/* ===== replace drawLandmarksMapped with contain-aware mapping ===== */
 function drawLandmarksMapped(handsArr){
+  // Use the same info computed in drawVideoToCanvasSquare so positions match exactly
+  const info = canvas._lastDrawInfo;
+  if(!info){ return; }
+
   ctx.save();
   ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
   const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
 
-  const cw = canvas.clientWidth; const ch = canvas.clientHeight;
-  const vw = video.videoWidth || 1; const vh = video.videoHeight || 1;
-  const crop = computeCoverCrop(vw, vh, cw, ch);
-  const sx = crop.sx, sy = crop.sy, sw = crop.sw, sh = crop.sh;
-  const scaleX = cw / sw; const scaleY = ch / sh;
+  // info.sx..sh are full video; info.dx,dy,dw,dh are destination area in CSS pixels
+  const destX = info.dx;
+  const destY = info.dy;
+  const scaleX = info.dw / info.sw; // CSS scale
+  const scaleY = info.dh / info.sh;
+
+  // Convert to canvas device pixels (ctx already uses dpr*mirror transform)
+  const dpr = window.devicePixelRatio || 1;
+  const destXpx = destX * dpr;
+  const destYpx = destY * dpr;
+  const scaleXpx = scaleX * dpr;
+  const scaleYpx = scaleY * dpr;
 
   ctx.beginPath();
   for(const hand of handsArr){
     for(const c of connections){
       const a = hand[c[0]], b = hand[c[1]];
-      const ax = ((a.x * vw) - sx) * scaleX;
-      const ay = ((a.y * vh) - sy) * scaleY;
-      const bx = ((b.x * vw) - sx) * scaleX;
-      const by = ((b.y * vh) - sy) * scaleY;
+      const ax = destXpx + (a.x * info.sw) * scaleXpx;
+      const ay = destYpx + (a.y * info.sh) * scaleYpx;
+      const bx = destXpx + (b.x * info.sw) * scaleXpx;
+      const by = destYpx + (b.y * info.sh) * scaleYpx;
       ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
     }
   }
@@ -368,8 +334,8 @@ function drawLandmarksMapped(handsArr){
   for(const hand of handsArr){
     for(let i=0;i<hand.length;i++){
       const p = hand[i];
-      const px = ((p.x * vw) - sx) * scaleX;
-      const py = ((p.y * vh) - sy) * scaleY;
+      const px = destXpx + (p.x * info.sw) * scaleXpx;
+      const py = destYpx + (p.y * info.sh) * scaleYpx;
       ctx.beginPath(); ctx.arc(px, py, i===8?6:4,0,Math.PI*2); ctx.fill();
     }
   }
@@ -434,4 +400,5 @@ clearChat.addEventListener('click', ()=> { chatWindow.innerHTML = ''; });
 </script>
 </body>
 </html>
+
 
